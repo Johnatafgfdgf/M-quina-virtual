@@ -4,6 +4,7 @@ set -u
 BASE=/tmp/maquina-virtual
 PIDDIR="$BASE/pids"
 SESSION="$BASE/session.json"
+LOGDIR="$BASE/logs"
 
 check_pid() {
   local name="$1"
@@ -13,20 +14,28 @@ check_pid() {
     pid="$(cat "$file" 2>/dev/null || true)"
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       printf '✅ %-12s PID %s\n' "$name" "$pid"
-      return
+      return 0
     fi
   fi
   printf '❌ %-12s parado\n' "$name"
+  return 1
 }
 
 echo "=== Máquina Virtual ==="
 for name in xvfb lxqt x11vnc websockify cloudflared; do
-  check_pid "$name"
+  check_pid "$name" || true
 done
 
 echo
 echo "=== Portas locais ==="
 ss -ltn 2>/dev/null | grep -E ':5900|:6080' || true
+
+LOCAL_CODE="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:6080/vnc.html 2>/dev/null || true)"
+if [[ "$LOCAL_CODE" =~ ^2[0-9][0-9]$ ]]; then
+  echo "✅ noVNC local HTTP $LOCAL_CODE"
+else
+  echo "❌ noVNC local HTTP ${LOCAL_CODE:-sem resposta}"
+fi
 
 echo
 echo "=== GPU ==="
@@ -37,8 +46,16 @@ else
 fi
 
 echo
-echo "=== Sessão ==="
+echo "=== Sessão / túnel ==="
 if [ -f "$SESSION" ]; then
+  URL="$(python3 - <<'PY'
+import json
+p='/tmp/maquina-virtual/session.json'
+with open(p, encoding='utf-8') as f:
+    d=json.load(f)
+print(d.get('public_url',''))
+PY
+)"
   python3 - <<'PY'
 import json
 p='/tmp/maquina-virtual/session.json'
@@ -46,8 +63,21 @@ with open(p, encoding='utf-8') as f:
     d=json.load(f)
 print('URL:', d.get('public_url',''))
 print('Resolução:', d.get('resolution',''))
+print('Túnel verificado ao criar:', d.get('tunnel_verified', False))
 print('Deep link:', d.get('deep_link',''))
 PY
+  if [ -n "$URL" ]; then
+    PUBLIC_CODE="$(curl -L -sS --max-time 8 -o /dev/null -w '%{http_code}' "${URL%/}/vnc.html" 2>/dev/null || true)"
+    if [[ "$PUBLIC_CODE" =~ ^2[0-9][0-9]$ ]]; then
+      echo "✅ túnel público HTTP $PUBLIC_CODE"
+    else
+      echo "❌ túnel público HTTP ${PUBLIC_CODE:-sem resposta}"
+    fi
+  fi
 else
   echo "Nenhuma sessão ativa registrada."
 fi
+
+echo
+echo "=== Últimas linhas do cloudflared ==="
+tail -n 25 "$LOGDIR/cloudflared.log" 2>/dev/null || echo "Sem log do cloudflared."

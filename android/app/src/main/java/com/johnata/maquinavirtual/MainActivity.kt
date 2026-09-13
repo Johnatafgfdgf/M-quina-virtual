@@ -60,7 +60,7 @@ class MainActivity : Activity() {
     private val panel = Color.rgb(15, 20, 34)
     private val panel2 = Color.rgb(22, 29, 48)
     private val border = Color.rgb(44, 55, 84)
-    private val text = Color.rgb(246, 248, 255)
+    private val primaryText = Color.rgb(246, 248, 255)
     private val muted = Color.rgb(158, 168, 198)
     private val accent = Color.rgb(112, 83, 255)
     private val accent2 = Color.rgb(100, 145, 255)
@@ -131,7 +131,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         val logo = TextView(this).apply {
-            this.text = "MV"
+            text = "MV"
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
             textSize = 19f
@@ -147,7 +147,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), 0, 0, 0)
         }
-        title.addView(label("Máquina Virtual", 24f, text, true))
+        title.addView(label("Máquina Virtual", 24f, primaryText, true))
         title.addView(label("Desktop Linux remoto no celular", 13f, muted, false))
         header.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
         header.addView(chip("V0.3", accent2, Color.rgb(19, 28, 50)))
@@ -175,7 +175,7 @@ class MainActivity : Activity() {
         hero.addView(label(
             if (sessionReady) "Seu desktop está pronto para abrir." else "Inicie uma máquina no Colab.",
             26f,
-            text,
+            primaryText,
             true
         ))
         hero.addView(space(8))
@@ -348,7 +348,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(10), 0, dp(10), 0)
         }
-        title.addView(label("Desktop remoto", 15f, text, true))
+        title.addView(label("Desktop remoto", 15f, primaryText, true))
         statusLabel = label("● Conectando…", 11f, warning, false)
         title.addView(statusLabel)
         bar.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
@@ -528,7 +528,7 @@ class MainActivity : Activity() {
 
     private fun updateRemoteStatus(value: String, color: Int) {
         statusLabel?.apply {
-            this.text = "● $value"
+            text = "● $value"
             setTextColor(color)
         }
     }
@@ -575,7 +575,7 @@ class MainActivity : Activity() {
         return EditText(this).apply {
             hint = hintText
             setHintTextColor(Color.rgb(105, 115, 143))
-            setTextColor(text)
+            setTextColor(primaryText)
             textSize = 14f
             setText(initial)
             setPadding(dp(16), 0, dp(16), 0)
@@ -587,7 +587,7 @@ class MainActivity : Activity() {
     }
 
     private fun primaryButton(value: String, action: () -> Unit): TextView = TextView(this).apply {
-        this.text = value
+        text = value
         gravity = Gravity.CENTER
         setTextColor(Color.WHITE)
         textSize = 14f
@@ -598,9 +598,9 @@ class MainActivity : Activity() {
     }
 
     private fun secondaryButton(value: String, action: () -> Unit): TextView = TextView(this).apply {
-        this.text = value
+        text = value
         gravity = Gravity.CENTER
-        setTextColor(text)
+        setTextColor(primaryText)
         textSize = 12f
         typeface = Typeface.DEFAULT_BOLD
         background = rounded(panel2, 15f, border)
@@ -608,9 +608,9 @@ class MainActivity : Activity() {
     }
 
     private fun iconButton(value: String, action: () -> Unit): TextView = TextView(this).apply {
-        this.text = value
+        text = value
         gravity = Gravity.CENTER
-        setTextColor(text)
+        setTextColor(primaryText)
         textSize = if (value.length > 2) 10f else 24f
         typeface = Typeface.DEFAULT_BOLD
         background = rounded(panel2, 13f, border)
@@ -629,7 +629,7 @@ class MainActivity : Activity() {
     }
 
     private fun chip(value: String, color: Int, fill: Int): TextView = TextView(this).apply {
-        this.text = value
+        text = value
         gravity = Gravity.CENTER
         setTextColor(color)
         textSize = 11f
@@ -650,7 +650,7 @@ class MainActivity : Activity() {
     private fun sectionTitle(value: String): TextView = label(value, 12f, muted, true).apply { letterSpacing = 0.08f }
 
     private fun label(value: String, size: Float, color: Int, bold: Boolean): TextView = TextView(this).apply {
-        this.text = value
+        text = value
         textSize = size
         setTextColor(color)
         setLineSpacing(0f, 1.12f)

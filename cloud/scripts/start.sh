@@ -39,8 +39,8 @@ HEIGHT="${RESOLUTION#*x}"
 export DISPLAY
 export XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)"
 export XDG_SESSION_TYPE=x11
-export XDG_CURRENT_DESKTOP=LXQt
-export DESKTOP_SESSION=lxqt
+export XDG_CURRENT_DESKTOP="MaquinaVirtual"
+export DESKTOP_SESSION=openbox
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 
@@ -107,16 +107,16 @@ if [ ! -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ]; then
   exit 3
 fi
 
-echo "[2/5] Iniciando LXQt..."
-DESKTOP_BIN="$(command -v startlxqt || command -v lxqt-session || true)"
+echo "[2/5] Iniciando desktop personalizado..."
+DESKTOP_BIN="$(command -v openbox-session || command -v openbox || true)"
 if [ -z "$DESKTOP_BIN" ]; then
-  echo "LXQt não encontrado. Execute install.sh primeiro." >&2
+  echo "Openbox não encontrado. Execute install.sh primeiro." >&2
   exit 4
 fi
+# Mantemos o nome do PID como 'lxqt' para compatibilidade com status/stop antigos,
+# mas a casca visual agora é Openbox + tint2. Os aplicativos LXQt continuam disponíveis.
 spawn lxqt dbus-run-session -- "$DESKTOP_BIN"
-sleep 2
-
-# Aplica a camada visual personalizada. Se algo visual falhar, o desktop continua vivo.
+sleep 1
 bash "$SCRIPT_DIR/theme.sh" "$RESOLUTION" >"$LOGDIR/theme.log" 2>&1 || true
 sleep 0.6
 

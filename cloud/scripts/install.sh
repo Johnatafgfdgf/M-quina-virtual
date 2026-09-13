@@ -16,10 +16,13 @@ apt-get install -y --no-install-recommends \
   libqt5svg5 \
   fonts-noto fonts-dejavu fonts-liberation
 
-# Pacotes de acabamento visual. Se o tema de ícones não estiver disponível
-# nessa imagem do Ubuntu, o desktop continua funcionando com os ícones padrão.
+# Camada visual. É opcional: uma falha aqui nunca impede a máquina de iniciar.
 apt-get install -y --no-install-recommends tint2 feh librsvg2-bin papirus-icon-theme \
   || apt-get install -y --no-install-recommends tint2 feh librsvg2-bin \
+  || true
+
+# Aplicativos úteis e leves para a sessão. Falkon evita depender de snaps no Colab.
+apt-get install -y --no-install-recommends falkon featherpad \
   || true
 
 mkdir -p /tmp/maquina-virtual/{logs,pids}

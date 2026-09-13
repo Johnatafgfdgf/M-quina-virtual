@@ -51,6 +51,28 @@ spawn() {
   echo $! > "$PIDDIR/$name.pid"
 }
 
+stop_proc() {
+  local name="$1"
+  local pidfile="$PIDDIR/$name.pid"
+  [ -f "$pidfile" ] || return 0
+  local pid
+  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    sleep 0.5
+  fi
+  rm -f "$pidfile"
+}
+
+pid_alive() {
+  local name="$1"
+  local pidfile="$PIDDIR/$name.pid"
+  [ -f "$pidfile" ] || return 1
+  local pid
+  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
 wait_port() {
   local port="$1"
   local attempts="${2:-40}"
@@ -61,6 +83,13 @@ wait_port() {
     sleep 0.25
   done
   return 1
+}
+
+public_ok() {
+  local url="$1"
+  local code
+  code="$(curl -L -sS --max-time 8 -o /dev/null -w '%{http_code}' "${url%/}/vnc.html" 2>/dev/null || true)"
+  [[ "$code" =~ ^2[0-9][0-9]$ ]]
 }
 
 echo "[1/5] Iniciando display X virtual..."
@@ -130,6 +159,14 @@ if ! wait_port "$NOVNC_PORT" 50; then
   exit 7
 fi
 
+# Confirma que o servidor web local realmente responde antes de publicar.
+LOCAL_CODE="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${NOVNC_PORT}/vnc.html" 2>/dev/null || true)"
+if [[ ! "$LOCAL_CODE" =~ ^2[0-9][0-9]$ ]]; then
+  echo "noVNC local não respondeu corretamente (HTTP $LOCAL_CODE)." >&2
+  tail -n 40 "$LOGDIR/websockify.log" >&2 || true
+  exit 7
+fi
+
 echo "[5/5] Criando túnel HTTPS temporário..."
 CLOUDFLARED=/usr/local/bin/cloudflared
 if [ ! -x "$CLOUDFLARED" ]; then
@@ -145,18 +182,49 @@ if [ ! -x "$CLOUDFLARED" ]; then
   chmod 755 "$CLOUDFLARED"
 fi
 
-spawn cloudflared "$CLOUDFLARED" tunnel --no-autoupdate --url "http://127.0.0.1:${NOVNC_PORT}"
-
 PUBLIC_URL=""
-for _ in $(seq 1 80); do
-  PUBLIC_URL="$(grep -oE 'https://[A-Za-z0-9-]+\.trycloudflare\.com' "$LOGDIR/cloudflared.log" 2>/dev/null | head -n1 || true)"
-  [ -n "$PUBLIC_URL" ] && break
-  sleep 0.5
-done
+TUNNEL_OK=0
 
-if [ -z "$PUBLIC_URL" ]; then
-  tail -n 60 "$LOGDIR/cloudflared.log" >&2 || true
-  echo "O túnel HTTPS não retornou uma URL." >&2
+# Quick Tunnel pode publicar o hostname antes de o conector estar saudável.
+# Por isso só liberamos o link depois de obter resposta HTTP real do noVNC.
+for attempt in 1 2 3; do
+  echo "  tentativa de túnel $attempt/3..."
+  stop_proc cloudflared || true
+  : > "$LOGDIR/cloudflared.log"
+
+  # HTTP/2 é mais tolerante em ambientes onde UDP/QUIC é filtrado.
+  spawn cloudflared "$CLOUDFLARED" tunnel \
+    --no-autoupdate \
+    --protocol http2 \
+    --edge-ip-version 4 \
+    --url "http://127.0.0.1:${NOVNC_PORT}"
+
+  PUBLIC_URL=""
+  for _ in $(seq 1 120); do
+    if ! pid_alive cloudflared; then
+      break
+    fi
+
+    if [ -z "$PUBLIC_URL" ]; then
+      PUBLIC_URL="$(grep -oE 'https://[A-Za-z0-9-]+\.trycloudflare\.com' "$LOGDIR/cloudflared.log" 2>/dev/null | head -n1 || true)"
+    fi
+
+    if [ -n "$PUBLIC_URL" ] && public_ok "$PUBLIC_URL"; then
+      TUNNEL_OK=1
+      break
+    fi
+    sleep 0.5
+  done
+
+  [ "$TUNNEL_OK" -eq 1 ] && break
+  echo "  túnel ainda não saudável; reiniciando..."
+  tail -n 25 "$LOGDIR/cloudflared.log" >&2 || true
+  sleep 1
+ done
+
+if [ "$TUNNEL_OK" -ne 1 ] || [ -z "$PUBLIC_URL" ]; then
+  echo "Não foi possível estabelecer um túnel HTTPS saudável." >&2
+  tail -n 80 "$LOGDIR/cloudflared.log" >&2 || true
   exit 9
 fi
 
@@ -182,6 +250,7 @@ data = {
     "resolution": resolution,
     "deep_link": deep,
     "created_at": int(time.time()),
+    "tunnel_verified": True,
 }
 with open(os.environ["MV_SESSION_FILE"], "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)
@@ -190,6 +259,6 @@ PY
 
 chmod 600 "$SESSION_FILE"
 echo
-echo "[Máquina Virtual] Sessão pronta."
+echo "[Máquina Virtual] Sessão pronta e túnel verificado."
 echo "URL: $PUBLIC_URL"
 echo "Senha: $PASSWORD"

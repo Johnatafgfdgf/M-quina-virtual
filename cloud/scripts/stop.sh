@@ -11,8 +11,6 @@ stop_one() {
   local pid
   pid="$(cat "$file" 2>/dev/null || true)"
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    # start.sh cria cada serviço em uma sessão/grupo próprio via setsid.
-    # Encerrar o grupo evita deixar processos filhos órfãos (ex.: dbus/LXQt).
     kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
     sleep 0.4
     if kill -0 "$pid" 2>/dev/null; then
@@ -22,9 +20,11 @@ stop_one() {
   rm -f "$file"
 }
 
-for name in cloudflared websockify x11vnc lxqt xvfb; do
+for name in cloudflared websockify x11vnc tint2 lxqt xvfb; do
   stop_one "$name"
 done
 
+pkill -x tint2 >/dev/null 2>&1 || true
+pkill -x feh >/dev/null 2>&1 || true
 rm -f "$BASE/session.json" "$BASE/vnc.pass"
 echo "[Máquina Virtual] Sessão encerrada."

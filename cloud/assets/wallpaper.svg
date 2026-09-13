@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="720" viewBox="0 0 1600 720">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#070b16"/>
+      <stop offset="0.52" stop-color="#101936"/>
+      <stop offset="1" stop-color="#1a123e"/>
+    </linearGradient>
+    <radialGradient id="glow1" cx="0.18" cy="0.18" r="0.6">
+      <stop offset="0" stop-color="#6c4eff" stop-opacity="0.48"/>
+      <stop offset="1" stop-color="#6c4eff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="0.82" cy="0.42" r="0.52">
+      <stop offset="0" stop-color="#4d8dff" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#4d8dff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="mountain" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f316e"/>
+      <stop offset="1" stop-color="#11152e"/>
+    </linearGradient>
+    <filter id="blur"><feGaussianBlur stdDeviation="28"/></filter>
+  </defs>
+
+  <rect width="1600" height="720" fill="url(#bg)"/>
+  <rect width="1600" height="720" fill="url(#glow1)"/>
+  <rect width="1600" height="720" fill="url(#glow2)"/>
+
+  <circle cx="1260" cy="145" r="92" fill="#8a67ff" opacity="0.16" filter="url(#blur)"/>
+  <circle cx="1260" cy="145" r="61" fill="#9a82ff" opacity="0.9"/>
+  <circle cx="1242" cy="127" r="55" fill="#8a72f3" opacity="0.7"/>
+
+  <path d="M0 560 L185 430 L330 525 L515 345 L705 515 L895 385 L1070 515 L1250 350 L1440 500 L1600 405 L1600 720 L0 720 Z" fill="url(#mountain)" opacity="0.95"/>
+  <path d="M0 620 L220 510 L390 605 L610 475 L790 605 L1010 495 L1185 612 L1385 500 L1600 590 L1600 720 L0 720 Z" fill="#0a1023" opacity="0.97"/>
+
+  <g transform="translate(800 315)">
+    <circle r="82" fill="none" stroke="#8265ff" stroke-width="10" opacity="0.95"/>
+    <circle r="53" fill="none" stroke="#5f94ff" stroke-width="8" opacity="0.85" stroke-dasharray="42 22"/>
+    <circle cx="67" cy="-47" r="10" fill="#b8a9ff"/>
+    <circle cx="-71" cy="39" r="7" fill="#6ee7c1"/>
+  </g>
+
+  <text x="800" y="445" text-anchor="middle" fill="#f4f6ff" font-family="sans-serif" font-size="38" font-weight="700" letter-spacing="5">MÁQUINA VIRTUAL</text>
+  <text x="800" y="490" text-anchor="middle" fill="#a9b2d0" font-family="sans-serif" font-size="18" letter-spacing="6">SEU LINUX • EM QUALQUER LUGAR</text>
+
+  <path d="M0 655 C280 620, 470 700, 760 662 S1240 610, 1600 668" fill="none" stroke="#765cff" stroke-opacity="0.28" stroke-width="2"/>
+</svg>

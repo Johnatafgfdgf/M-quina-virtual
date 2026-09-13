@@ -21,7 +21,12 @@ if [[ ! "$RESOLUTION" =~ ^[0-9]+x[0-9]+$ ]]; then
 fi
 
 if [ -z "$PASSWORD" ]; then
-  PASSWORD="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 8)"
+  PASSWORD="$(python3 - <<'PY'
+import secrets, string
+alphabet = string.ascii_letters + string.digits
+print(''.join(secrets.choice(alphabet) for _ in range(8)))
+PY
+)"
 fi
 PASSWORD="${PASSWORD:0:8}"
 
@@ -42,7 +47,7 @@ chmod 700 "$XDG_RUNTIME_DIR"
 spawn() {
   local name="$1"
   shift
-  nohup "$@" >"$LOGDIR/$name.log" 2>&1 < /dev/null &
+  setsid nohup "$@" >"$LOGDIR/$name.log" 2>&1 < /dev/null &
   echo $! > "$PIDDIR/$name.pid"
 }
 
@@ -185,6 +190,6 @@ PY
 
 chmod 600 "$SESSION_FILE"
 echo
- echo "[Máquina Virtual] Sessão pronta."
+echo "[Máquina Virtual] Sessão pronta."
 echo "URL: $PUBLIC_URL"
 echo "Senha: $PASSWORD"

@@ -15,6 +15,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.webkit.CookieManager
@@ -37,18 +38,18 @@ class MainActivity : Activity() {
     private var currentPassword: String = ""
     private val prefs by lazy { getSharedPreferences("maquina_virtual", MODE_PRIVATE) }
 
-    private val bg = Color.rgb(9, 11, 18)
-    private val panel = Color.rgb(18, 22, 34)
-    private val panel2 = Color.rgb(25, 30, 46)
-    private val text = Color.rgb(244, 246, 255)
-    private val muted = Color.rgb(155, 164, 190)
-    private val accent = Color.rgb(126, 92, 255)
-    private val accent2 = Color.rgb(72, 211, 255)
-    private val success = Color.rgb(82, 214, 146)
+    private val bgColor = Color.rgb(9, 11, 18)
+    private val panelColor = Color.rgb(18, 22, 34)
+    private val panel2Color = Color.rgb(25, 30, 46)
+    private val primaryTextColor = Color.rgb(244, 246, 255)
+    private val mutedColor = Color.rgb(155, 164, 190)
+    private val accentColor = Color.rgb(126, 92, 255)
+    private val accent2Color = Color.rgb(72, 211, 255)
+    private val successColor = Color.rgb(82, 214, 146)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        root = FrameLayout(this).apply { setBackgroundColor(bg) }
+        root = FrameLayout(this).apply { setBackgroundColor(bgColor) }
         setContentView(root)
         configureSystemBars(false)
         showHome(intent)
@@ -75,7 +76,10 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(22), dp(28), dp(22), dp(28))
         }
-        scroll.addView(content, ScrollView.LayoutParams(-1, -2))
+        scroll.addView(
+            content,
+            ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        )
         root.addView(scroll, FrameLayout.LayoutParams(-1, -1))
 
         val brandRow = LinearLayout(this).apply {
@@ -88,15 +92,16 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE)
             textSize = 24f
             typeface = Typeface.DEFAULT_BOLD
-            background = rounded(accent, 18f)
+            background = rounded(accentColor, 18f)
         }
         brandRow.addView(mark, LinearLayout.LayoutParams(dp(54), dp(54)))
+
         val brandText = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), 0, 0, 0)
         }
-        brandText.addView(label("MÁQUINA VIRTUAL", 22f, text, true))
-        brandText.addView(label("Seu desktop Linux remoto no celular", 13f, muted, false))
+        brandText.addView(label("MÁQUINA VIRTUAL", 22f, primaryTextColor, true))
+        brandText.addView(label("Seu desktop Linux remoto no celular", 13f, mutedColor, false))
         brandRow.addView(brandText, LinearLayout.LayoutParams(0, -2, 1f))
         content.addView(brandRow)
 
@@ -107,32 +112,43 @@ class MainActivity : Activity() {
             setPadding(dp(20), dp(20), dp(20), dp(20))
             background = gradientPanel()
         }
-        val status = label("●  PRONTO PARA CONECTAR", 12f, success, true)
-        hero.addView(status)
+        hero.addView(label("●  PRONTO PARA CONECTAR", 12f, successColor, true))
         hero.addView(space(12))
-        hero.addView(label("Uma janela para a sua máquina na nuvem.", 28f, text, true))
+        hero.addView(label("Uma janela para a sua máquina na nuvem.", 28f, primaryTextColor, true))
         hero.addView(space(8))
-        hero.addView(label("Inicie a sessão no notebook e abra o link no app. A porta VNC fica local e somente a interface HTTPS é publicada.", 14f, muted, false))
+        hero.addView(
+            label(
+                "Inicie a sessão no notebook e abra o link no app. A porta VNC fica local e somente a interface HTTPS é publicada.",
+                14f,
+                mutedColor,
+                false
+            )
+        )
         content.addView(hero)
 
         content.addView(space(22))
-        content.addView(label("CONEXÃO", 12f, muted, true))
+        content.addView(label("CONEXÃO", 12f, mutedColor, true))
         content.addView(space(10))
 
         val incomingUri = incoming?.data
-        val deepUrl = incomingUri?.takeIf { it.scheme == "maquinavirtual" && it.host == "connect" }
-            ?.getQueryParameter("url")
-        val deepPassword = incomingUri?.takeIf { it.scheme == "maquinavirtual" && it.host == "connect" }
-            ?.getQueryParameter("password")
+        val validDeepLink = incomingUri?.takeIf {
+            it.scheme == "maquinavirtual" && it.host == "connect"
+        }
+        val deepUrl = validDeepLink?.getQueryParameter("url")
+        val deepPassword = validDeepLink?.getQueryParameter("password")
 
-        val urlInput = field("URL HTTPS da sessão", deepUrl ?: prefs.getString("last_url", "").orEmpty())
+        val urlInput = field(
+            "URL HTTPS da sessão",
+            deepUrl ?: prefs.getString("last_url", "").orEmpty()
+        )
         content.addView(urlInput)
         content.addView(space(10))
+
         val passInput = field("Senha temporária", deepPassword.orEmpty(), password = true)
         content.addView(passInput)
         content.addView(space(14))
 
-        val connect = actionButton("ABRIR DESKTOP", accent) {
+        val connect = actionButton("ABRIR DESKTOP", accentColor) {
             val rawUrl = urlInput.text.toString().trim()
             val password = passInput.text.toString()
             if (!isSafeSessionUrl(rawUrl)) {
@@ -145,17 +161,34 @@ class MainActivity : Activity() {
         content.addView(connect, LinearLayout.LayoutParams(-1, dp(54)))
 
         content.addView(space(10))
-        val notebook = actionButton("INICIAR / GERENCIAR SESSÃO", panel2) {
-            openExternal("https://colab.research.google.com/github/Johnatafgfdgf/M-quina-virtual/blob/main/cloud/MaquinaVirtual.ipynb")
+        val notebook = actionButton("INICIAR / GERENCIAR SESSÃO", panel2Color) {
+            openExternal(
+                "https://colab.research.google.com/github/Johnatafgfdgf/M-quina-virtual/blob/main/cloud/MaquinaVirtual.ipynb"
+            )
         }
         content.addView(notebook, LinearLayout.LayoutParams(-1, dp(50)))
 
         content.addView(space(24))
-        content.addView(infoCard("CONEXÃO SEGURA", "VNC escuta apenas em localhost. O app recebe uma URL HTTPS temporária do túnel."))
+        content.addView(
+            infoCard(
+                "CONEXÃO SEGURA",
+                "VNC escuta apenas em localhost. O app recebe uma URL HTTPS temporária do túnel."
+            )
+        )
         content.addView(space(10))
-        content.addView(infoCard("SESSÃO TEMPORÁRIA", "O runtime pode ser encerrado pelo provedor. Arquivos importantes devem ser salvos em armazenamento persistente."))
+        content.addView(
+            infoCard(
+                "SESSÃO TEMPORÁRIA",
+                "O runtime pode ser encerrado pelo provedor. Arquivos importantes devem ser salvos em armazenamento persistente."
+            )
+        )
         content.addView(space(10))
-        content.addView(infoCard("MODO MOBILE", "O visualizador usa noVNC dentro do app com toque, teclado e redimensionamento para a tela do celular."))
+        content.addView(
+            infoCard(
+                "MODO MOBILE",
+                "O visualizador usa noVNC dentro do app com toque, teclado e redimensionamento para a tela do celular."
+            )
+        )
 
         if (!deepUrl.isNullOrBlank() && isSafeSessionUrl(deepUrl)) {
             Handler(Looper.getMainLooper()).postDelayed({
@@ -178,19 +211,29 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(10), dp(8), dp(10), dp(8))
-            setBackgroundColor(bg)
+            setBackgroundColor(bgColor)
         }
 
-        toolbar.addView(compactButton("‹") { showHome() }, LinearLayout.LayoutParams(dp(48), dp(44)))
+        toolbar.addView(
+            compactButton("‹") { showHome() },
+            LinearLayout.LayoutParams(dp(48), dp(44))
+        )
+
         val title = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(8), 0, dp(8), 0)
         }
-        title.addView(label("Desktop remoto", 15f, text, true))
-        title.addView(label("● conexão protegida por HTTPS", 11f, success, false))
+        title.addView(label("Desktop remoto", 15f, primaryTextColor, true))
+        title.addView(label("● conexão protegida por HTTPS", 11f, successColor, false))
         toolbar.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
-        toolbar.addView(compactButton("SENHA") { copyPassword() }, LinearLayout.LayoutParams(dp(72), dp(44)))
-        toolbar.addView(compactButton("↻") { webView?.reload() }, LinearLayout.LayoutParams(dp(48), dp(44)))
+        toolbar.addView(
+            compactButton("SENHA") { copyPassword() },
+            LinearLayout.LayoutParams(dp(72), dp(44))
+        )
+        toolbar.addView(
+            compactButton("↻") { webView?.reload() },
+            LinearLayout.LayoutParams(dp(48), dp(44))
+        )
 
         container.addView(toolbar, LinearLayout.LayoutParams(-1, dp(60)))
 
@@ -212,9 +255,11 @@ class MainActivity : Activity() {
         CookieManager.getInstance().setAcceptThirdPartyCookies(browser, false)
         browser.webChromeClient = WebChromeClient()
         browser.webViewClient = object : WebViewClient() {
-            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                val target = request.url
-                return target.scheme != "https"
+            override fun shouldOverrideUrlLoading(
+                view: WebView,
+                request: WebResourceRequest
+            ): Boolean {
+                return request.url.scheme != "https"
             }
 
             override fun onPageFinished(view: WebView, url: String) {
@@ -281,7 +326,9 @@ class MainActivity : Activity() {
             return
         }
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("Senha da Máquina Virtual", currentPassword))
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText("Senha da Máquina Virtual", currentPassword)
+        )
         toast("Senha copiada.")
     }
 
@@ -289,24 +336,33 @@ class MainActivity : Activity() {
         startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
     }
 
-    private fun field(hintText: String, initial: String, password: Boolean = false): EditText {
+    private fun field(
+        hintText: String,
+        initial: String,
+        password: Boolean = false
+    ): EditText {
         return EditText(this).apply {
             hint = hintText
             setHintTextColor(Color.rgb(104, 113, 139))
-            setTextColor(text)
+            setTextColor(primaryTextColor)
             textSize = 14f
             setText(initial)
             setPadding(dp(16), 0, dp(16), 0)
-            singleLine = true
-            background = rounded(panel, 14f, Color.rgb(45, 53, 76))
+            setSingleLine(true)
+            background = rounded(panelColor, 14f, Color.rgb(45, 53, 76))
             if (password) {
-                inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+                inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                    android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
             }
             layoutParams = LinearLayout.LayoutParams(-1, dp(54))
         }
     }
 
-    private fun actionButton(textValue: String, color: Int, action: () -> Unit): TextView {
+    private fun actionButton(
+        textValue: String,
+        color: Int,
+        action: () -> Unit
+    ): TextView {
         return TextView(this).apply {
             text = textValue
             gravity = Gravity.CENTER
@@ -325,10 +381,10 @@ class MainActivity : Activity() {
         return TextView(this).apply {
             text = textValue
             gravity = Gravity.CENTER
-            setTextColor(text)
+            setTextColor(primaryTextColor)
             textSize = if (textValue.length > 2) 10f else 24f
             typeface = Typeface.DEFAULT_BOLD
-            background = rounded(panel2, 12f)
+            background = rounded(panel2Color, 12f)
             setOnClickListener { action() }
         }
     }
@@ -337,14 +393,19 @@ class MainActivity : Activity() {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(15), dp(16), dp(15))
-            background = rounded(panel, 15f, Color.rgb(33, 39, 58))
-            addView(label(title, 12f, accent2, true))
+            background = rounded(panelColor, 15f, Color.rgb(33, 39, 58))
+            addView(label(title, 12f, accent2Color, true))
             addView(space(5))
-            addView(label(body, 13f, muted, false))
+            addView(label(body, 13f, mutedColor, false))
         }
     }
 
-    private fun label(value: String, size: Float, color: Int, bold: Boolean): TextView {
+    private fun label(
+        value: String,
+        size: Float,
+        color: Int,
+        bold: Boolean
+    ): TextView {
         return TextView(this).apply {
             text = value
             textSize = size
@@ -358,7 +419,11 @@ class MainActivity : Activity() {
         layoutParams = LinearLayout.LayoutParams(1, dp(height))
     }
 
-    private fun rounded(fill: Int, radius: Float, stroke: Int? = null): GradientDrawable {
+    private fun rounded(
+        fill: Int,
+        radius: Float,
+        stroke: Int? = null
+    ): GradientDrawable {
         return GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             setColor(fill)
@@ -370,14 +435,17 @@ class MainActivity : Activity() {
     private fun gradientPanel(): GradientDrawable {
         return GradientDrawable(
             GradientDrawable.Orientation.TL_BR,
-            intArrayOf(Color.rgb(34, 29, 67), Color.rgb(18, 28, 51), panel)
-        ).apply { cornerRadius = dp(22).toFloat() }
+            intArrayOf(Color.rgb(34, 29, 67), Color.rgb(18, 28, 51), panelColor)
+        ).apply {
+            cornerRadius = dp(22).toFloat()
+        }
     }
 
     private fun configureSystemBars(remote: Boolean) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             window.insetsController?.let { controller ->
-                controller.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller.systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 if (remote) {
                     controller.hide(WindowInsets.Type.statusBars())
                 } else {
@@ -392,15 +460,17 @@ class MainActivity : Activity() {
                 View.SYSTEM_UI_FLAG_VISIBLE
             }
         }
-        window.statusBarColor = bg
-        window.navigationBarColor = bg
+        window.statusBarColor = bgColor
+        window.navigationBarColor = bgColor
     }
 
     private fun toast(message: String) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    private fun dp(value: Int): Int {
+        return (value * resources.displayMetrics.density).toInt()
+    }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {

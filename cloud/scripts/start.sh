@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-RESOLUTION="${1:-1600x900}"
+RESOLUTION="${1:-1600x720}"
 PASSWORD="${2:-}"
 DISPLAY_NUM="${DISPLAY_NUM:-10}"
 DISPLAY=":${DISPLAY_NUM}"
@@ -116,6 +116,10 @@ fi
 spawn lxqt dbus-run-session -- "$DESKTOP_BIN"
 sleep 2
 
+# Aplica a camada visual personalizada. Se algo visual falhar, o desktop continua vivo.
+bash "$SCRIPT_DIR/theme.sh" "$RESOLUTION" >"$LOGDIR/theme.log" 2>&1 || true
+sleep 0.6
+
 echo "[3/5] Iniciando VNC local..."
 VNC_PASS="$BASE/vnc.pass"
 x11vnc -storepasswd "$PASSWORD" "$VNC_PASS" >/dev/null 2>&1
@@ -159,7 +163,6 @@ if ! wait_port "$NOVNC_PORT" 50; then
   exit 7
 fi
 
-# Confirma que o servidor web local realmente responde antes de publicar.
 LOCAL_CODE="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${NOVNC_PORT}/vnc.html" 2>/dev/null || true)"
 if [[ ! "$LOCAL_CODE" =~ ^2[0-9][0-9]$ ]]; then
   echo "noVNC local não respondeu corretamente (HTTP $LOCAL_CODE)." >&2
@@ -184,15 +187,10 @@ fi
 
 PUBLIC_URL=""
 TUNNEL_OK=0
-
-# Quick Tunnel pode publicar o hostname antes de o conector estar saudável.
-# Por isso só liberamos o link depois de obter resposta HTTP real do noVNC.
 for attempt in 1 2 3; do
   echo "  tentativa de túnel $attempt/3..."
   stop_proc cloudflared || true
   : > "$LOGDIR/cloudflared.log"
-
-  # HTTP/2 é mais tolerante em ambientes onde UDP/QUIC é filtrado.
   spawn cloudflared "$CLOUDFLARED" tunnel \
     --no-autoupdate \
     --protocol http2 \
@@ -201,26 +199,19 @@ for attempt in 1 2 3; do
 
   PUBLIC_URL=""
   for _ in $(seq 1 120); do
-    if ! pid_alive cloudflared; then
-      break
-    fi
-
+    if ! pid_alive cloudflared; then break; fi
     if [ -z "$PUBLIC_URL" ]; then
       PUBLIC_URL="$(grep -oE 'https://[A-Za-z0-9-]+\.trycloudflare\.com' "$LOGDIR/cloudflared.log" 2>/dev/null | head -n1 || true)"
     fi
-
     if [ -n "$PUBLIC_URL" ] && public_ok "$PUBLIC_URL"; then
       TUNNEL_OK=1
       break
     fi
     sleep 0.5
   done
-
   [ "$TUNNEL_OK" -eq 1 ] && break
-  echo "  túnel ainda não saudável; reiniciando..."
-  tail -n 25 "$LOGDIR/cloudflared.log" >&2 || true
   sleep 1
- done
+done
 
 if [ "$TUNNEL_OK" -ne 1 ] || [ -z "$PUBLIC_URL" ]; then
   echo "Não foi possível estabelecer um túnel HTTPS saudável." >&2

@@ -6,6 +6,7 @@ PIDDIR="$BASE/pids"
 SESSION="$BASE/session.json"
 LOGDIR="$BASE/logs"
 MODE_FILE="$BASE/desktop_mode"
+DISPLAY_MODE_FILE="$BASE/display_mode"
 
 check_pid() {
   local name="$1"
@@ -27,8 +28,18 @@ for name in xvfb lxqt x11vnc websockify cloudflared; do
   check_pid "$name" || true
 done
 
-if [ -f "$MODE_FILE" ]; then
-  echo "Desktop: $(cat "$MODE_FILE")"
+echo
+echo "=== Ambiente gráfico ==="
+echo "Display server: $(cat "$DISPLAY_MODE_FILE" 2>/dev/null || echo desconhecido)"
+echo "Desktop:        $(cat "$MODE_FILE" 2>/dev/null || echo desconhecido)"
+if command -v google-chrome >/dev/null 2>&1; then
+  echo "Navegador:      Google Chrome"
+elif command -v epiphany >/dev/null 2>&1; then
+  echo "Navegador:      GNOME Web"
+elif command -v falkon >/dev/null 2>&1; then
+  echo "Navegador:      Falkon"
+else
+  echo "Navegador:      não encontrado"
 fi
 
 echo
@@ -53,7 +64,12 @@ if command -v glxinfo >/dev/null 2>&1; then
   DISPLAY=:10 glxinfo -B 2>/dev/null | grep -E 'OpenGL vendor|OpenGL renderer|OpenGL core profile version|OpenGL version' || true
 fi
 if command -v vulkaninfo >/dev/null 2>&1; then
-  echo "Vulkan tool: instalado"
+  VULKAN_DEVICE="$(vulkaninfo --summary 2>/dev/null | grep -m1 'deviceName' | sed 's/.*= *//' || true)"
+  if [ -n "$VULKAN_DEVICE" ]; then
+    echo "Vulkan: $VULKAN_DEVICE"
+  else
+    echo "Vulkan: não disponível"
+  fi
 fi
 
 echo
@@ -74,6 +90,7 @@ with open(p, encoding='utf-8') as f:
     d=json.load(f)
 print('URL:', d.get('public_url',''))
 print('Resolução:', d.get('resolution',''))
+print('Display:', d.get('display_mode',''))
 print('Desktop:', d.get('desktop_mode',''))
 print('Usuário:', d.get('session_user',''))
 print('Túnel verificado ao criar:', d.get('tunnel_verified', False))
@@ -93,8 +110,16 @@ fi
 
 echo
 echo "=== Últimas linhas do desktop ==="
-tail -n 30 "$LOGDIR/lxqt.log" 2>/dev/null || echo "Sem log do desktop."
+tail -n 50 "$LOGDIR/lxqt.log" 2>/dev/null || echo "Sem log do desktop."
+
+echo
+echo "=== Últimas linhas do Xorg/Xvfb ==="
+if [ -f "$LOGDIR/Xorg.0.log" ]; then
+  tail -n 35 "$LOGDIR/Xorg.0.log" 2>/dev/null || true
+else
+  tail -n 35 "$LOGDIR/xvfb.log" 2>/dev/null || true
+fi
 
 echo
 echo "=== Últimas linhas do cloudflared ==="
-tail -n 25 "$LOGDIR/cloudflared.log" 2>/dev/null || echo "Sem log do cloudflared."
+tail -n 20 "$LOGDIR/cloudflared.log" 2>/dev/null || echo "Sem log do cloudflared."

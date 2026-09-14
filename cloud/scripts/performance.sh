@@ -6,7 +6,9 @@ set -u
 SESSION_USER="${SESSION_USER:-mvuser}"
 BASE=/tmp/maquina-virtual
 PERF_JSON="$BASE/performance.json"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$BASE/logs" "$BASE/pids"
+chmod +x "$SCRIPT_DIR/watchdog.sh" 2>/dev/null || true
 
 CPU_THREADS="$(nproc 2>/dev/null || echo 1)"
 CPU_THREADS="${CPU_THREADS:-1}"
@@ -25,7 +27,6 @@ if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
   GPU_VRAM_MB="${GPU_VRAM_MB:-0}"
 fi
 
-# Variáveis herdadas por IDEs, renderizadores e workloads científicos.
 export MV_PERFORMANCE_PROFILE=max
 export MV_CPU_THREADS="$CPU_THREADS"
 export MV_RAM_MB="$RAM_MB"
@@ -56,8 +57,6 @@ if id -u "$SESSION_USER" >/dev/null 2>&1; then
   export __GL_SHADER_DISK_CACHE_PATH="$USER_HOME/.cache/nvidia"
 fi
 
-# Ajustes seguros quando o host permite. Falhas são ignoradas porque o Colab
-# pode bloquear sysctls/governors mesmo quando a sessão está saudável.
 if command -v sysctl >/dev/null 2>&1; then
   sysctl -w vm.swappiness=10 >/dev/null 2>&1 || true
   sysctl -w vm.vfs_cache_pressure=50 >/dev/null 2>&1 || true

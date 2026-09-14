@@ -3,6 +3,7 @@ set -euo pipefail
 
 RESOLUTION="${1:-1600x720}"
 PASSWORD="${2:-}"
+SESSION_USER="${SESSION_USER:-mvuser}"
 DISPLAY_NUM="${DISPLAY_NUM:-10}"
 DISPLAY=":${DISPLAY_NUM}"
 VNC_PORT="${VNC_PORT:-5900}"
@@ -34,20 +35,38 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bash "$SCRIPT_DIR/stop.sh" >/dev/null 2>&1 || true
 mkdir -p "$LOGDIR" "$PIDDIR"
 
+if ! id -u "$SESSION_USER" >/dev/null 2>&1; then
+  echo "Usuário gráfico '$SESSION_USER' não existe. Execute install.sh primeiro." >&2
+  exit 3
+fi
+SESSION_HOME="$(getent passwd "$SESSION_USER" | cut -d: -f6)"
+RUNTIME_DIR="/tmp/runtime-$SESSION_USER"
+mkdir -p "$RUNTIME_DIR"
+chown "$SESSION_USER:$SESSION_USER" "$RUNTIME_DIR"
+chmod 700 "$RUNTIME_DIR"
+
+# A senha temporária da sessão também funciona para sudo dentro do desktop.
+printf '%s:%s\n' "$SESSION_USER" "$PASSWORD" | chpasswd
+
 WIDTH="${RESOLUTION%x*}"
 HEIGHT="${RESOLUTION#*x}"
 export DISPLAY
-export XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)"
-export XDG_SESSION_TYPE=x11
-export XDG_CURRENT_DESKTOP="MaquinaVirtual"
-export DESKTOP_SESSION=openbox
-mkdir -p "$XDG_RUNTIME_DIR"
-chmod 700 "$XDG_RUNTIME_DIR"
 
 spawn() {
   local name="$1"
   shift
   setsid nohup "$@" >"$LOGDIR/$name.log" 2>&1 < /dev/null &
+  echo $! > "$PIDDIR/$name.pid"
+}
+
+spawn_user() {
+  local name="$1"
+  shift
+  setsid nohup runuser -u "$SESSION_USER" -- env \
+    HOME="$SESSION_HOME" USER="$SESSION_USER" LOGNAME="$SESSION_USER" \
+    DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+    XDG_SESSION_TYPE=x11 GDK_BACKEND=x11 \
+    "$@" >"$LOGDIR/$name.log" 2>&1 < /dev/null &
   echo $! > "$PIDDIR/$name.pid"
 }
 
@@ -59,7 +78,10 @@ stop_proc() {
   pid="$(cat "$pidfile" 2>/dev/null || true)"
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-    sleep 0.5
+    sleep 0.7
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    fi
   fi
   rm -f "$pidfile"
 }
@@ -104,21 +126,76 @@ for _ in $(seq 1 40); do
 done
 if [ ! -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ]; then
   tail -n 30 "$LOGDIR/xvfb.log" >&2 || true
-  exit 3
-fi
-
-echo "[2/5] Iniciando desktop personalizado..."
-DESKTOP_BIN="$(command -v openbox-session || command -v openbox || true)"
-if [ -z "$DESKTOP_BIN" ]; then
-  echo "Openbox não encontrado. Execute install.sh primeiro." >&2
   exit 4
 fi
-# Mantemos o nome do PID como 'lxqt' para compatibilidade com status/stop antigos,
-# mas a casca visual agora é Openbox + tint2. Os aplicativos LXQt continuam disponíveis.
-spawn lxqt dbus-run-session -- "$DESKTOP_BIN"
-sleep 1
-bash "$SCRIPT_DIR/theme.sh" "$RESOLUTION" >"$LOGDIR/theme.log" 2>&1 || true
-sleep 0.6
+
+echo "[2/5] Iniciando ambiente gráfico..."
+DESKTOP_MODE=""
+
+# 1) GNOME Shell completo. Xvfb não oferece aceleração real, então usamos llvmpipe nesta fase.
+if command -v gnome-session >/dev/null 2>&1 && [ -f /usr/share/gnome-session/sessions/gnome.session ]; then
+  echo "  tentando GNOME completo..."
+  spawn_user lxqt env \
+    XDG_CURRENT_DESKTOP=GNOME DESKTOP_SESSION=gnome \
+    LIBGL_ALWAYS_SOFTWARE=1 CLUTTER_BACKEND=x11 \
+    dbus-run-session -- gnome-session --session=gnome
+  for _ in $(seq 1 24); do
+    if pgrep -u "$SESSION_USER" -x gnome-shell >/dev/null 2>&1; then
+      DESKTOP_MODE="gnome"
+      break
+    fi
+    pid_alive lxqt || break
+    sleep 0.5
+  done
+  if [ -z "$DESKTOP_MODE" ]; then
+    echo "  GNOME Shell não estabilizou; usando fallback GNOME."
+    stop_proc lxqt || true
+    pkill -u "$SESSION_USER" -f 'gnome-session|gnome-shell|mutter' >/dev/null 2>&1 || true
+    sleep 0.5
+  fi
+fi
+
+# 2) GNOME Flashback + Metacity. Visual GNOME, bem mais tolerante a displays headless.
+if [ -z "$DESKTOP_MODE" ] && command -v gnome-session >/dev/null 2>&1 && [ -f /usr/share/gnome-session/sessions/gnome-flashback-metacity.session ]; then
+  echo "  tentando GNOME Flashback..."
+  spawn_user lxqt env \
+    XDG_CURRENT_DESKTOP='GNOME-Flashback:GNOME' DESKTOP_SESSION=gnome-flashback-metacity \
+    LIBGL_ALWAYS_SOFTWARE=1 \
+    dbus-run-session -- gnome-session --session=gnome-flashback-metacity
+  for _ in $(seq 1 24); do
+    if pgrep -u "$SESSION_USER" -x metacity >/dev/null 2>&1 || pgrep -u "$SESSION_USER" -x gnome-panel >/dev/null 2>&1; then
+      DESKTOP_MODE="gnome-flashback"
+      break
+    fi
+    pid_alive lxqt || break
+    sleep 0.5
+  done
+  if [ -z "$DESKTOP_MODE" ]; then
+    echo "  GNOME Flashback não estabilizou; usando fallback leve."
+    stop_proc lxqt || true
+    pkill -u "$SESSION_USER" -f 'gnome-session|gnome-panel|metacity' >/dev/null 2>&1 || true
+    sleep 0.5
+  fi
+fi
+
+# 3) Último fallback. Mantém a máquina acessível mesmo se GNOME não funcionar naquele runtime.
+if [ -z "$DESKTOP_MODE" ]; then
+  DESKTOP_BIN="$(command -v openbox-session || command -v openbox || true)"
+  if [ -z "$DESKTOP_BIN" ]; then
+    echo "Nenhum desktop utilizável encontrado. Execute install.sh novamente." >&2
+    exit 5
+  fi
+  echo "  iniciando Openbox de emergência..."
+  spawn_user lxqt env XDG_CURRENT_DESKTOP=MaquinaVirtual DESKTOP_SESSION=openbox \
+    dbus-run-session -- "$DESKTOP_BIN"
+  sleep 1
+  DESKTOP_MODE="openbox"
+fi
+
+echo "$DESKTOP_MODE" > "$BASE/desktop_mode"
+echo "  desktop ativo: $DESKTOP_MODE"
+bash "$SCRIPT_DIR/theme.sh" "$RESOLUTION" "$SESSION_USER" >"$LOGDIR/theme.log" 2>&1 || true
+sleep 0.8
 
 echo "[3/5] Iniciando VNC local..."
 VNC_PASS="$BASE/vnc.pass"
@@ -133,7 +210,7 @@ spawn x11vnc x11vnc \
 
 if ! wait_port "$VNC_PORT" 50; then
   tail -n 40 "$LOGDIR/x11vnc.log" >&2 || true
-  exit 5
+  exit 6
 fi
 
 echo "[4/5] Iniciando noVNC..."
@@ -150,7 +227,7 @@ if [ -z "$NOVNC_ROOT" ]; then
 fi
 if [ -z "$NOVNC_ROOT" ]; then
   echo "Não foi possível localizar os arquivos do noVNC." >&2
-  exit 6
+  exit 7
 fi
 
 spawn websockify websockify \
@@ -160,14 +237,13 @@ spawn websockify websockify \
 
 if ! wait_port "$NOVNC_PORT" 50; then
   tail -n 40 "$LOGDIR/websockify.log" >&2 || true
-  exit 7
+  exit 8
 fi
 
 LOCAL_CODE="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${NOVNC_PORT}/vnc.html" 2>/dev/null || true)"
 if [[ ! "$LOCAL_CODE" =~ ^2[0-9][0-9]$ ]]; then
   echo "noVNC local não respondeu corretamente (HTTP $LOCAL_CODE)." >&2
-  tail -n 40 "$LOGDIR/websockify.log" >&2 || true
-  exit 7
+  exit 8
 fi
 
 echo "[5/5] Criando túnel HTTPS temporário..."
@@ -177,11 +253,9 @@ if [ ! -x "$CLOUDFLARED" ]; then
   case "$ARCH" in
     x86_64|amd64) ASSET=cloudflared-linux-amd64 ;;
     aarch64|arm64) ASSET=cloudflared-linux-arm64 ;;
-    *) echo "Arquitetura não suportada para cloudflared: $ARCH" >&2; exit 8 ;;
+    *) echo "Arquitetura não suportada para cloudflared: $ARCH" >&2; exit 9 ;;
   esac
-  curl -fL --retry 3 \
-    "https://github.com/cloudflare/cloudflared/releases/latest/download/${ASSET}" \
-    -o "$CLOUDFLARED"
+  curl -fL --retry 3 "https://github.com/cloudflare/cloudflared/releases/latest/download/${ASSET}" -o "$CLOUDFLARED"
   chmod 755 "$CLOUDFLARED"
 fi
 
@@ -192,9 +266,7 @@ for attempt in 1 2 3; do
   stop_proc cloudflared || true
   : > "$LOGDIR/cloudflared.log"
   spawn cloudflared "$CLOUDFLARED" tunnel \
-    --no-autoupdate \
-    --protocol http2 \
-    --edge-ip-version 4 \
+    --no-autoupdate --protocol http2 --edge-ip-version 4 \
     --url "http://127.0.0.1:${NOVNC_PORT}"
 
   PUBLIC_URL=""
@@ -216,18 +288,22 @@ done
 if [ "$TUNNEL_OK" -ne 1 ] || [ -z "$PUBLIC_URL" ]; then
   echo "Não foi possível estabelecer um túnel HTTPS saudável." >&2
   tail -n 80 "$LOGDIR/cloudflared.log" >&2 || true
-  exit 9
+  exit 10
 fi
 
 export MV_PUBLIC_URL="$PUBLIC_URL"
 export MV_PASSWORD="$PASSWORD"
 export MV_RESOLUTION="$RESOLUTION"
 export MV_SESSION_FILE="$SESSION_FILE"
+export MV_DESKTOP_MODE="$DESKTOP_MODE"
+export MV_SESSION_USER="$SESSION_USER"
 python3 - <<'PY'
 import json, os, time, urllib.parse
 base = os.environ["MV_PUBLIC_URL"].rstrip("/")
 password = os.environ["MV_PASSWORD"]
 resolution = os.environ["MV_RESOLUTION"]
+desktop = os.environ["MV_DESKTOP_MODE"]
+user = os.environ["MV_SESSION_USER"]
 viewer = base + "/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=websockify"
 deep = "maquinavirtual://connect?" + urllib.parse.urlencode({
     "url": base,
@@ -240,6 +316,8 @@ data = {
     "password": password,
     "resolution": resolution,
     "deep_link": deep,
+    "desktop_mode": desktop,
+    "session_user": user,
     "created_at": int(time.time()),
     "tunnel_verified": True,
 }
@@ -251,5 +329,7 @@ PY
 chmod 600 "$SESSION_FILE"
 echo
 echo "[Máquina Virtual] Sessão pronta e túnel verificado."
+echo "Desktop: $DESKTOP_MODE"
+echo "Usuário: $SESSION_USER"
 echo "URL: $PUBLIC_URL"
 echo "Senha: $PASSWORD"

@@ -14,6 +14,8 @@ PIDDIR="$BASE/pids"
 SESSION_FILE="$BASE/session.json"
 DISPLAY_MODE_FILE="$BASE/display_mode"
 SYSTEM_BUS_FILE="$BASE/system_bus"
+GPU_MODE_FILE="$BASE/gpu_mode"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 mkdir -p "$LOGDIR" "$PIDDIR"
 chmod 700 "$BASE"
@@ -39,7 +41,14 @@ PY
 fi
 PASSWORD="${PASSWORD:0:8}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# MAX é padrão. performance.sh apenas detecta/expõe recursos; não modifica este arquivo.
+if [ "${MV_PERFORMANCE_PROFILE:-}" != "max" ] && [ -f "$SCRIPT_DIR/performance.sh" ]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/performance.sh"
+fi
+GPU_AVAILABLE="${MV_GPU_AVAILABLE:-0}"
+echo "$GPU_AVAILABLE" > "$GPU_MODE_FILE"
+
 bash "$SCRIPT_DIR/stop.sh" >/dev/null 2>&1 || true
 mkdir -p "$LOGDIR" "$PIDDIR"
 : > "$LOGDIR/gnome-shell.log"
@@ -88,7 +97,7 @@ stop_proc() {
   pid="$(cat "$pidfile" 2>/dev/null || true)"
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-    sleep 0.7
+    sleep 0.6
     if kill -0 "$pid" 2>/dev/null; then
       kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
     fi
@@ -111,6 +120,14 @@ system_bus_ok() {
     >/dev/null 2>&1
 }
 
+login1_ok() {
+  command -v gdbus >/dev/null 2>&1 || return 1
+  gdbus introspect --system \
+    --dest org.freedesktop.login1 \
+    --object-path /org/freedesktop/login1 \
+    >/dev/null 2>&1
+}
+
 ensure_system_bus() {
   dbus-uuidgen --ensure=/etc/machine-id >/dev/null 2>&1 || true
   mkdir -p /run/dbus /var/lib/dbus
@@ -124,7 +141,6 @@ ensure_system_bus() {
     return 0
   fi
 
-  # Primeiro tenta os serviços normais do runtime, se systemd estiver funcional.
   if command -v systemctl >/dev/null 2>&1; then
     timeout 5s systemctl start dbus.service >/dev/null 2>&1 || true
     timeout 5s systemctl start systemd-logind.service >/dev/null 2>&1 || true
@@ -136,8 +152,6 @@ ensure_system_bus() {
     return 0
   fi
 
-  # Colab pode ter PID 1 systemd sem um system bus utilizável. Nesse caso
-  # iniciamos o daemon padrão diretamente no socket esperado pelos aplicativos.
   rm -f /run/dbus/system_bus_socket /run/dbus/pid 2>/dev/null || true
   if command -v dbus-daemon >/dev/null 2>&1; then
     dbus-daemon --system --fork --nopidfile >"$LOGDIR/system-dbus.log" 2>&1 || true
@@ -182,6 +196,71 @@ public_ok() {
   local code
   code="$(curl -L -sS --max-time 8 -o /dev/null -w '%{http_code}' "${url%/}/vnc.html" 2>/dev/null || true)"
   [[ "$code" =~ ^2[0-9][0-9]$ ]]
+}
+
+start_xorg_nvidia() {
+  [ "$GPU_AVAILABLE" = "1" ] || return 1
+  command -v Xorg >/dev/null 2>&1 || return 1
+  command -v nvidia-smi >/dev/null 2>&1 || return 1
+
+  local pci_raw xorg_bus conf
+  pci_raw="$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader 2>/dev/null | head -n1 | xargs || true)"
+  [ -n "$pci_raw" ] || return 1
+  xorg_bus="$(python3 - "$pci_raw" <<'PY'
+import sys
+s=sys.argv[1].strip()
+try:
+    parts=s.split(':')
+    bus=int(parts[-2],16)
+    dev,func=parts[-1].split('.')
+    print(f'PCI:{bus}:{int(dev,16)}:{int(func,16)}')
+except Exception:
+    pass
+PY
+)"
+  [ -n "$xorg_bus" ] || return 1
+
+  conf="$BASE/xorg-nvidia.conf"
+  cat > "$conf" <<EOF
+Section "ServerFlags"
+    Option "AutoAddDevices" "false"
+    Option "DontVTSwitch" "true"
+    Option "AllowMouseOpenFail" "true"
+EndSection
+Section "Device"
+    Identifier "NvidiaCard"
+    Driver "nvidia"
+    BusID "$xorg_bus"
+    Option "AllowEmptyInitialConfiguration" "True"
+    Option "UseDisplayDevice" "None"
+    Option "HardDPMS" "False"
+EndSection
+Section "Screen"
+    Identifier "NvidiaScreen"
+    Device "NvidiaCard"
+    DefaultDepth 24
+    SubSection "Display"
+        Depth 24
+        Virtual $WIDTH $HEIGHT
+    EndSubSection
+EndSection
+Section "ServerLayout"
+    Identifier "NvidiaLayout"
+    Screen "NvidiaScreen"
+EndSection
+EOF
+
+  echo "  tentando Xorg NVIDIA headless..."
+  spawn xvfb Xorg "$DISPLAY" -config "$conf" -noreset -nolisten tcp -ac \
+    +extension GLX +extension RANDR +extension RENDER +extension XTEST
+  if wait_display 100; then
+    if DISPLAY="$DISPLAY" glxinfo -B 2>/dev/null | grep -qi 'NVIDIA'; then
+      echo "xorg-nvidia" > "$DISPLAY_MODE_FILE"
+      return 0
+    fi
+  fi
+  stop_proc xvfb || true
+  return 1
 }
 
 start_xorg_dummy() {
@@ -241,25 +320,31 @@ echo "[0/5] Preparando D-Bus do sistema..."
 if ensure_system_bus; then
   echo "  system D-Bus: $(cat "$SYSTEM_BUS_FILE")"
 else
-  echo "  aviso: system D-Bus indisponível; GNOME provavelmente usará fallback."
+  echo "  aviso: system D-Bus indisponível; usando fallbacks compatíveis."
 fi
 
 echo "[1/5] Iniciando display virtual..."
-if ! start_xorg_dummy; then
-  echo "  Xorg Dummy falhou; usando Xvfb."
-  spawn xvfb Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" \
-    -nolisten tcp -ac -noreset \
-    +extension RANDR +extension RENDER +extension XTEST +extension GLX
-  if ! wait_display 60; then
-    echo "Nenhum display virtual conseguiu iniciar." >&2
-    tail -n 60 "$LOGDIR/xvfb.log" >&2 || true
-    exit 4
+if ! start_xorg_nvidia; then
+  if ! start_xorg_dummy; then
+    echo "  Xorg falhou; usando Xvfb."
+    spawn xvfb Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" \
+      -nolisten tcp -ac -noreset \
+      +extension RANDR +extension RENDER +extension XTEST +extension GLX
+    if ! wait_display 60; then
+      echo "Nenhum display virtual conseguiu iniciar." >&2
+      tail -n 60 "$LOGDIR/xvfb.log" >&2 || true
+      exit 4
+    fi
+    echo "xvfb" > "$DISPLAY_MODE_FILE"
   fi
-  echo "xvfb" > "$DISPLAY_MODE_FILE"
 fi
 
 echo "  display ativo: $(cat "$DISPLAY_MODE_FILE")"
 DISPLAY="$DISPLAY" xhost +SI:localuser:"$SESSION_USER" >/dev/null 2>&1 || true
+
+# O layout do Flashback é preparado antes do painel iniciar. Nunca mais usamos
+# gnome-panel --replace depois do boot, porque isso encerrava a sessão inteira.
+bash "$SCRIPT_DIR/theme.sh" "$RESOLUTION" "$SESSION_USER" pre >"$LOGDIR/theme-pre.log" 2>&1 || true
 
 echo "[2/5] Iniciando ambiente gráfico..."
 DESKTOP_MODE=""
@@ -267,7 +352,7 @@ DESKTOP_MODE=""
 start_gnome_shell() {
   [ -x /usr/bin/gnome-session ] || return 1
   [ -f /usr/share/gnome-session/sessions/gnome.session ] || return 1
-  echo "  tentando GNOME Shell builtin..."
+  echo "  tentando GNOME Shell..."
   spawn_user_log lxqt gnome-shell env \
     XDG_CURRENT_DESKTOP=GNOME \
     XDG_SESSION_DESKTOP=gnome \
@@ -275,10 +360,8 @@ start_gnome_shell() {
     GDMSESSION=gnome \
     GNOME_SHELL_SESSION_MODE=gnome \
     XDG_MENU_PREFIX=gnome- \
-    LIBGL_ALWAYS_SOFTWARE=1 \
-    GALLIUM_DRIVER=llvmpipe \
     dbus-launch --exit-with-session \
-    /usr/bin/gnome-session --builtin --disable-acceleration-check --debug --session=gnome
+    /usr/bin/gnome-session --disable-acceleration-check --debug --session=gnome
 
   for _ in $(seq 1 100); do
     if pgrep -u "$SESSION_USER" -x gnome-shell >/dev/null 2>&1; then
@@ -300,16 +383,14 @@ start_gnome_shell() {
 start_gnome_flashback() {
   [ -x /usr/bin/gnome-session ] || return 1
   [ -f /usr/share/gnome-session/sessions/gnome-flashback-metacity.session ] || return 1
-  echo "  tentando GNOME Flashback builtin..."
+  echo "  tentando GNOME Flashback..."
   spawn_user_log lxqt gnome-flashback env \
     XDG_CURRENT_DESKTOP='GNOME-Flashback:GNOME' \
     XDG_SESSION_DESKTOP=gnome-flashback-metacity \
     DESKTOP_SESSION=gnome-flashback-metacity \
     XDG_MENU_PREFIX=gnome-flashback- \
-    LIBGL_ALWAYS_SOFTWARE=1 \
-    GALLIUM_DRIVER=llvmpipe \
     dbus-launch --exit-with-session \
-    /usr/bin/gnome-session --builtin --disable-acceleration-check --debug --session=gnome-flashback-metacity
+    /usr/bin/gnome-session --disable-acceleration-check --debug --session=gnome-flashback-metacity
 
   for _ in $(seq 1 80); do
     if pgrep -u "$SESSION_USER" -x metacity >/dev/null 2>&1 || \
@@ -330,10 +411,18 @@ start_gnome_flashback() {
   return 1
 }
 
-if ! start_gnome_shell; then
-  echo "  GNOME Shell não estabilizou; veja logs/gnome-shell.log."
+# No runtime CPU-only já sabemos que o GNOME Shell 46 morre no login1 e ainda
+# consome CPU via llvmpipe. MAX prioriza o Flashback moderno nesses casos.
+if [ "$GPU_AVAILABLE" = "1" ] && login1_ok; then
+  if ! start_gnome_shell; then
+    echo "  GNOME Shell não estabilizou; usando Flashback."
+    start_gnome_flashback || true
+  fi
+else
+  echo "  MAX: CPU-only/login1 indisponível, priorizando GNOME Flashback."
   if ! start_gnome_flashback; then
-    echo "  GNOME Flashback não estabilizou; veja logs/gnome-flashback.log."
+    echo "  Flashback falhou; tentando GNOME Shell como fallback."
+    start_gnome_shell || true
   fi
 fi
 
@@ -352,17 +441,25 @@ fi
 
 echo "$DESKTOP_MODE" > "$BASE/desktop_mode"
 echo "  desktop ativo: $DESKTOP_MODE"
-bash "$SCRIPT_DIR/theme.sh" "$RESOLUTION" "$SESSION_USER" >"$LOGDIR/theme.log" 2>&1 || true
-sleep 0.8
+bash "$SCRIPT_DIR/theme.sh" "$RESOLUTION" "$SESSION_USER" post >"$LOGDIR/theme.log" 2>&1 || true
+sleep 0.5
 
 echo "[3/5] Iniciando VNC local..."
 VNC_PASS="$BASE/vnc.pass"
 x11vnc -storepasswd "$PASSWORD" "$VNC_PASS" >/dev/null 2>&1
 chmod 600 "$VNC_PASS"
-spawn x11vnc x11vnc -display "$DISPLAY" -forever -shared -repeat -noxdamage \
-  -rfbport "$VNC_PORT" -rfbauth "$VNC_PASS" -localhost
+
+VNC_ARGS=(x11vnc -display "$DISPLAY" -forever -shared -repeat \
+  -rfbport "$VNC_PORT" -rfbauth "$VNC_PASS" -localhost)
+# XDamage no Xorg Dummy/llvmpipe foi instável no teste real. Mantemos o modo
+# seguro em CPU-only; com Xorg NVIDIA real podemos aproveitar damage tracking.
+DISPLAY_MODE_NOW="$(cat "$DISPLAY_MODE_FILE" 2>/dev/null || echo unknown)"
+if [ "$GPU_AVAILABLE" != "1" ] || [ "$DISPLAY_MODE_NOW" != "xorg-nvidia" ]; then
+  VNC_ARGS+=( -noxdamage )
+fi
+spawn x11vnc "${VNC_ARGS[@]}"
 if ! wait_port "$VNC_PORT" 50; then
-  tail -n 40 "$LOGDIR/x11vnc.log" >&2 || true
+  tail -n 60 "$LOGDIR/x11vnc.log" >&2 || true
   exit 6
 fi
 
@@ -454,21 +551,45 @@ system_bus = os.environ["MV_SYSTEM_BUS"]
 viewer = base + "/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=websockify"
 deep = "maquinavirtual://connect?" + urllib.parse.urlencode({"url": base, "password": password, "resolution": resolution})
 data = {
-  "public_url": base, "viewer_url": viewer, "password": password,
-  "resolution": resolution, "deep_link": deep, "desktop_mode": desktop,
-  "display_mode": display_mode, "session_user": user, "system_bus": system_bus,
-  "created_at": int(time.time()), "tunnel_verified": True,
+  "public_url": base,
+  "viewer_url": viewer,
+  "password": password,
+  "resolution": resolution,
+  "deep_link": deep,
+  "desktop_mode": desktop,
+  "display_mode": display_mode,
+  "session_user": user,
+  "system_bus": system_bus,
+  "created_at": int(time.time()),
+  "tunnel_verified": True,
 }
+perf_path = "/tmp/maquina-virtual/performance.json"
+try:
+    with open(perf_path, encoding="utf-8") as f:
+        data["performance"] = json.load(f)
+except Exception:
+    pass
 with open(os.environ["MV_SESSION_FILE"], "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)
 print(json.dumps(data, ensure_ascii=False))
 PY
 chmod 600 "$SESSION_FILE"
 
+# Watchdog local muito leve: só recupera x11vnc/websockify se um deles cair.
+if [ -x "$SCRIPT_DIR/watchdog.sh" ]; then
+  spawn watchdog bash "$SCRIPT_DIR/watchdog.sh" "$DISPLAY" "$VNC_PORT" "$NOVNC_PORT"
+fi
+
 echo
 echo "[Máquina Virtual] Sessão pronta e túnel verificado."
+echo "Perfil: ${MV_PERFORMANCE_PROFILE:-max}"
+echo "CPU: ${MV_CPU_THREADS:-?} threads | RAM: ${MV_RAM_MB:-?} MB"
+if [ "$GPU_AVAILABLE" = "1" ]; then
+  echo "GPU: ${MV_GPU_NAME:-NVIDIA} | Display: $DISPLAY_MODE"
+else
+  echo "GPU: indisponível | Display: $DISPLAY_MODE"
+fi
 echo "System D-Bus: $SYSTEM_BUS_MODE"
-echo "Display: $DISPLAY_MODE"
 echo "Desktop: $DESKTOP_MODE"
 echo "Usuário: $SESSION_USER"
 echo "URL: $PUBLIC_URL"

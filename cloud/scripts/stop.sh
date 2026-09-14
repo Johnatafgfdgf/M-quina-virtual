@@ -21,16 +21,21 @@ stop_one() {
   rm -f "$file"
 }
 
-for name in cloudflared websockify x11vnc tint2 lxqt xvfb; do
+# Watchdog primeiro para ele não tentar ressuscitar serviços enquanto paramos.
+for name in watchdog cloudflared websockify x11vnc tint2 lxqt xvfb; do
   stop_one "$name"
 done
 
-# Usuário dedicado à sessão: qualquer sobra aqui pertence apenas ao desktop remoto.
 if id -u "$SESSION_USER" >/dev/null 2>&1; then
   pkill -TERM -u "$SESSION_USER" >/dev/null 2>&1 || true
   sleep 0.3
   pkill -KILL -u "$SESSION_USER" >/dev/null 2>&1 || true
 fi
 
-rm -f "$BASE/session.json" "$BASE/vnc.pass" "$BASE/desktop_mode"
+rm -f \
+  "$BASE/session.json" \
+  "$BASE/vnc.pass" \
+  "$BASE/desktop_mode" \
+  "$BASE/display_mode" \
+  "$BASE/gpu_mode"
 echo "[Máquina Virtual] Sessão encerrada."

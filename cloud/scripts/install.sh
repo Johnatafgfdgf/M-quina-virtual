@@ -15,17 +15,20 @@ apt-get install -y --no-install-recommends \
   fonts-noto fonts-dejavu fonts-liberation fonts-cantarell \
   mesa-utils mesa-vulkan-drivers vulkan-tools
 
-echo "[Máquina Virtual] Instalando GNOME..."
+echo "[Máquina Virtual] Instalando GNOME principal..."
 apt-get install -y --no-install-recommends \
   gnome-session gnome-shell gnome-terminal nautilus \
-  gnome-control-center gnome-tweaks \
-  gnome-session-flashback metacity \
-  gsettings-desktop-schemas adwaita-icon-theme-full \
-  yaru-theme-gtk yaru-theme-icon \
-  epiphany-browser eog evince file-roller \
+  gnome-control-center gsettings-desktop-schemas \
+  epiphany-browser eog evince file-roller
+
+# Pacotes visuais e sessão Flashback variam um pouco entre imagens Ubuntu.
+# São opcionais porque o GNOME principal deve continuar instalável mesmo se algum deles mudar de nome.
+apt-get install -y --no-install-recommends \
+  gnome-tweaks gnome-session-flashback metacity \
+  adwaita-icon-theme-full yaru-theme-gtk yaru-theme-icon \
   || true
 
-# Extensão de dock é visual e opcional. Se não existir na imagem atual, não quebra a instalação.
+# Dock opcional.
 apt-get install -y --no-install-recommends gnome-shell-extension-ubuntu-dock \
   || apt-get install -y --no-install-recommends gnome-shell-extension-dashtodock \
   || true
@@ -36,7 +39,7 @@ apt-get install -y --no-install-recommends \
   qterminal pcmanfm-qt featherpad falkon \
   || true
 
-# Usuário gráfico real. Aplicativos e navegadores não devem rodar como root.
+# Usuário gráfico real. Navegadores, IDEs e engines não devem rodar como root.
 if ! id -u "$SESSION_USER" >/dev/null 2>&1; then
   useradd -m -s /bin/bash "$SESSION_USER"
 fi

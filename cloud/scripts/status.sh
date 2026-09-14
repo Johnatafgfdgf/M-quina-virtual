@@ -109,8 +109,16 @@ else
 fi
 
 echo
-echo "=== Últimas linhas do desktop ==="
-tail -n 50 "$LOGDIR/lxqt.log" 2>/dev/null || echo "Sem log do desktop."
+echo "=== Diagnóstico GNOME ==="
+if [ -f "$LOGDIR/gnome-session.log" ]; then
+  tail -n 80 "$LOGDIR/gnome-session.log"
+else
+  echo "Sem log persistente do GNOME. Rode novamente Instalar desktop e Iniciar sessão."
+fi
+
+echo
+echo "=== Desktop ativo / fallback ==="
+tail -n 35 "$LOGDIR/lxqt.log" 2>/dev/null || echo "Sem log do desktop ativo."
 
 echo
 echo "=== Últimas linhas do Xorg/Xvfb ==="

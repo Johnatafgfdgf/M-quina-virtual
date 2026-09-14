@@ -11,7 +11,7 @@ echo "[Máquina Virtual] Instalando base gráfica e acesso remoto..."
 apt-get install -y --no-install-recommends \
   xserver-xorg-core xserver-xorg-video-dummy xserver-xorg-input-libinput xcvt \
   xvfb x11-xserver-utils xauth \
-  dbus dbus-daemon dbus-x11 dbus-user-session libpam-systemd policykit-1 \
+  dbus dbus-daemon dbus-x11 dbus-user-session libpam-systemd policykit-1 systemd \
   xdg-user-dirs xdg-utils \
   x11vnc novnc websockify \
   curl wget ca-certificates gnupg procps iproute2 openssl sudo \
@@ -51,11 +51,107 @@ apt-get install -y --no-install-recommends \
   qterminal pcmanfm-qt featherpad falkon \
   || true
 
-# O GNOME 46 do Ubuntu 24.04 depende fortemente da sessão systemd/GDM.
-# No Colab, o gnome-session chega a subir e depois derruba a sessão inteira.
-# Para o modo GNOME principal, usamos o GNOME Shell X11 diretamente, que é uma
-# opção suportada pelo próprio gnome-shell. Flashback continua usando o
-# gnome-session real e permanece como fallback confiável.
+# ---------------------------------------------------------------------------
+# systemd-logind / org.freedesktop.login1
+# ---------------------------------------------------------------------------
+# Em alguns runtimes Colab o system D-Bus funciona, mas a ativação padrão de
+# org.freedesktop.login1 delega ao systemd e falha. GNOME Shell 46 usa login1
+# logo no boot e encerra se esse endpoint não puder ser criado.
+#
+# Mantemos o systemd-logind REAL. A única diferença é a forma de ativação:
+# colocamos um serviço D-Bus em /etc (prioridade maior que /usr/share) que
+# executa o daemon diretamente quando o bus solicitar org.freedesktop.login1.
+LOGIN1_LAUNCHER=/usr/local/libexec/maquina-virtual-logind-launch
+mkdir -p /usr/local/libexec /etc/dbus-1/system-services
+cat > "$LOGIN1_LAUNCHER" <<'EOF'
+#!/usr/bin/env bash
+set -e
+mkdir -p \
+  /run/systemd/seats \
+  /run/systemd/sessions \
+  /run/systemd/users \
+  /run/systemd/inhibit \
+  /run/systemd/machines
+chmod 755 /run/systemd 2>/dev/null || true
+
+LOGIND_BIN=""
+for candidate in /usr/lib/systemd/systemd-logind /lib/systemd/systemd-logind; do
+  if [ -x "$candidate" ]; then
+    LOGIND_BIN="$candidate"
+    break
+  fi
+done
+
+if [ -z "$LOGIND_BIN" ]; then
+  echo "systemd-logind não encontrado" >&2
+  exit 127
+fi
+
+exec "$LOGIND_BIN"
+EOF
+chmod 755 "$LOGIN1_LAUNCHER"
+
+cat > /etc/dbus-1/system-services/org.freedesktop.login1.service <<EOF
+[D-BUS Service]
+Name=org.freedesktop.login1
+Exec=$LOGIN1_LAUNCHER
+User=root
+EOF
+chmod 644 /etc/dbus-1/system-services/org.freedesktop.login1.service
+
+# IDs e diretórios esperados pelo D-Bus/systemd.
+dbus-uuidgen --ensure=/etc/machine-id || true
+mkdir -p /var/lib/dbus /run/dbus \
+  /run/systemd/seats /run/systemd/sessions /run/systemd/users \
+  /run/systemd/inhibit /run/systemd/machines
+if [ ! -e /var/lib/dbus/machine-id ]; then
+  ln -s /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || \
+    cp /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
+fi
+
+# Se houver um systemd funcional, tentamos o caminho normal primeiro.
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed systemd-logind.service >/dev/null 2>&1 || true
+  systemctl start systemd-logind.service >/dev/null 2>&1 || true
+fi
+
+# Recarrega os arquivos de ativação do bus que já possa estar em execução.
+dbus-send --system --type=method_call \
+  --dest=org.freedesktop.DBus / org.freedesktop.DBus.ReloadConfig \
+  >/dev/null 2>&1 || true
+
+login1_ready() {
+  gdbus introspect --system \
+    --dest org.freedesktop.login1 \
+    --object-path /org/freedesktop/login1 \
+    >/dev/null 2>&1
+}
+
+# Força uma tentativa de ativação agora para que o problema apareça durante a
+# instalação, em vez de só quando o GNOME Shell iniciar.
+if ! login1_ready; then
+  # Última tentativa explícita. Se o serviço D-Bus puder ativar o launcher,
+  # este comando faz o bus iniciar o logind real.
+  dbus-send --system --type=method_call \
+    --dest=org.freedesktop.login1 /org/freedesktop/login1 \
+    org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1 || true
+  sleep 0.8
+fi
+
+if login1_ready; then
+  echo "[Máquina Virtual] systemd-logind/login1: pronto"
+else
+  echo "[Máquina Virtual] aviso: login1 ainda indisponível; GNOME Flashback será usado como fallback."
+fi
+
+# ---------------------------------------------------------------------------
+# GNOME 46 em X11
+# ---------------------------------------------------------------------------
+# O GNOME completo iniciado pelo gnome-session costuma desmontar a sessão no
+# Colab porque não existe um login GDM tradicional. Para o perfil principal,
+# iniciamos o GNOME Shell X11 diretamente. Flashback continua usando o
+# gnome-session real e é o fallback estável.
 GNOME_SHIM_DIR=/usr/libexec/maquina-virtual
 mkdir -p "$GNOME_SHIM_DIR"
 
@@ -91,7 +187,6 @@ for arg in "$@"; do
       ARGS+=("$arg")
       ;;
     --builtin|--systemd)
-      # Removidos no GNOME 46.
       ;;
     --disable-acceleration-check)
       if printf '%s\n' "$HELP" | grep -q -- '--disable-acceleration-check'; then
@@ -111,7 +206,6 @@ if [ "$SESSION_NAME" = "gnome" ]; then
     eval "$(gnome-keyring-daemon --start --components=secrets 2>/dev/null || true)" || true
   fi
 
-  # Serviços essenciais que normalmente seriam iniciados pelo gnome-session.
   for svc in \
     /usr/libexec/gsd-xsettings \
     /usr/libexec/gsd-keyboard \
@@ -134,6 +228,7 @@ exec "$REAL" "${ARGS[@]}"
 EOF
 chmod 755 /usr/bin/gnome-session
 
+# Usuário gráfico real.
 if ! id -u "$SESSION_USER" >/dev/null 2>&1; then
   useradd -m -s /bin/bash "$SESSION_USER"
 fi
@@ -142,13 +237,6 @@ for group in sudo audio video render; do
     usermod -aG "$group" "$SESSION_USER" || true
   fi
 done
-
-dbus-uuidgen --ensure=/etc/machine-id || true
-mkdir -p /var/lib/dbus /run/dbus
-if [ ! -e /var/lib/dbus/machine-id ]; then
-  ln -s /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || \
-    cp /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
-fi
 
 SESSION_HOME="$(getent passwd "$SESSION_USER" | cut -d: -f6)"
 mkdir -p \

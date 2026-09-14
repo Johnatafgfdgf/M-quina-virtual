@@ -8,6 +8,7 @@ LOGDIR="$BASE/logs"
 MODE_FILE="$BASE/desktop_mode"
 DISPLAY_MODE_FILE="$BASE/display_mode"
 SYSTEM_BUS_FILE="$BASE/system_bus"
+PERF_FILE="$BASE/performance.json"
 
 check_pid() {
   local name="$1"
@@ -33,6 +34,33 @@ echo "=== Máquina Virtual ==="
 for name in xvfb lxqt x11vnc websockify cloudflared; do
   check_pid "$name" || true
 done
+
+echo
+echo "=== Performance ==="
+if [ -f "$PERF_FILE" ]; then
+  python3 - <<'PY'
+import json
+p='/tmp/maquina-virtual/performance.json'
+with open(p, encoding='utf-8') as f: d=json.load(f)
+print('Perfil:         MAX')
+print('CPU threads:    ', d.get('cpu_threads','?'), sep='')
+print('RAM total:      ', d.get('ram_mb','?'), ' MB', sep='')
+if d.get('gpu_available'):
+    print('GPU:            ', d.get('gpu_name') or 'NVIDIA', sep='')
+    print('VRAM:           ', d.get('gpu_vram_mb',0), ' MB', sep='')
+else:
+    print('GPU:            indisponível neste runtime')
+print('Mesa GLThread:  ', 'ativo' if d.get('mesa_glthread') else 'inativo', sep='')
+PY
+else
+  echo "Perfil MAX ainda não foi aplicado nesta sessão."
+  echo "CPU threads disponíveis: $(nproc 2>/dev/null || echo '?')"
+fi
+CPU_MODEL="$(awk -F: '/model name/ {gsub(/^[ \t]+/,"",$2); print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
+[ -n "$CPU_MODEL" ] && echo "CPU:            $CPU_MODEL"
+MEM_AVAIL_MB="$(awk '/^MemAvailable:/ {printf "%d", $2/1024; exit}' /proc/meminfo 2>/dev/null || true)"
+[ -n "$MEM_AVAIL_MB" ] && echo "RAM disponível: ${MEM_AVAIL_MB} MB"
+echo "Load average:   $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo '?')"
 
 echo
 echo "=== Ambiente gráfico ==="

@@ -13,6 +13,7 @@ LOGDIR="$BASE/logs"
 PIDDIR="$BASE/pids"
 SESSION_FILE="$BASE/session.json"
 DISPLAY_MODE_FILE="$BASE/display_mode"
+SYSTEM_BUS_FILE="$BASE/system_bus"
 
 mkdir -p "$LOGDIR" "$PIDDIR"
 chmod 700 "$BASE"
@@ -21,7 +22,6 @@ if [[ ! "$RESOLUTION" =~ ^[0-9]+x[0-9]+$ ]]; then
   echo "Resolução inválida: $RESOLUTION" >&2
   exit 2
 fi
-
 WIDTH="${RESOLUTION%x*}"
 HEIGHT="${RESOLUTION#*x}"
 if [ "$WIDTH" -lt 800 ] || [ "$HEIGHT" -lt 480 ] || [ "$WIDTH" -gt 3840 ] || [ "$HEIGHT" -gt 2160 ]; then
@@ -42,6 +42,9 @@ PASSWORD="${PASSWORD:0:8}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bash "$SCRIPT_DIR/stop.sh" >/dev/null 2>&1 || true
 mkdir -p "$LOGDIR" "$PIDDIR"
+: > "$LOGDIR/gnome-shell.log"
+: > "$LOGDIR/gnome-flashback.log"
+: > "$LOGDIR/openbox.log"
 
 if ! id -u "$SESSION_USER" >/dev/null 2>&1; then
   echo "Usuário gráfico '$SESSION_USER' não existe. Execute install.sh primeiro." >&2
@@ -63,16 +66,18 @@ spawn() {
   echo $! > "$PIDDIR/$name.pid"
 }
 
-spawn_user() {
-  local name="$1"
-  shift
+spawn_user_log() {
+  local pid_name="$1"
+  local log_name="$2"
+  shift 2
   setsid nohup runuser -u "$SESSION_USER" -- env \
     HOME="$SESSION_HOME" USER="$SESSION_USER" LOGNAME="$SESSION_USER" \
     DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
     XDG_SESSION_TYPE=x11 XDG_SESSION_CLASS=user GDK_BACKEND=x11 \
+    DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
     NO_AT_BRIDGE=1 \
-    "$@" >"$LOGDIR/$name.log" 2>&1 < /dev/null &
-  echo $! > "$PIDDIR/$name.pid"
+    "$@" >"$LOGDIR/$log_name.log" 2>&1 < /dev/null &
+  echo $! > "$PIDDIR/$pid_name.pid"
 }
 
 stop_proc() {
@@ -98,6 +103,55 @@ pid_alive() {
   local pid
   pid="$(cat "$pidfile" 2>/dev/null || true)"
   [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+system_bus_ok() {
+  dbus-send --system --type=method_call \
+    --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames \
+    >/dev/null 2>&1
+}
+
+ensure_system_bus() {
+  dbus-uuidgen --ensure=/etc/machine-id >/dev/null 2>&1 || true
+  mkdir -p /run/dbus /var/lib/dbus
+  if [ ! -e /var/lib/dbus/machine-id ]; then
+    ln -s /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || \
+      cp /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
+  fi
+
+  if system_bus_ok; then
+    echo "ready" > "$SYSTEM_BUS_FILE"
+    return 0
+  fi
+
+  # Primeiro tenta os serviços normais do runtime, se systemd estiver funcional.
+  if command -v systemctl >/dev/null 2>&1; then
+    timeout 5s systemctl start dbus.service >/dev/null 2>&1 || true
+    timeout 5s systemctl start systemd-logind.service >/dev/null 2>&1 || true
+    timeout 5s systemctl start polkit.service >/dev/null 2>&1 || true
+  fi
+
+  if system_bus_ok; then
+    echo "ready-systemd" > "$SYSTEM_BUS_FILE"
+    return 0
+  fi
+
+  # Colab pode ter PID 1 systemd sem um system bus utilizável. Nesse caso
+  # iniciamos o daemon padrão diretamente no socket esperado pelos aplicativos.
+  rm -f /run/dbus/system_bus_socket /run/dbus/pid 2>/dev/null || true
+  if command -v dbus-daemon >/dev/null 2>&1; then
+    dbus-daemon --system --fork --nopidfile >"$LOGDIR/system-dbus.log" 2>&1 || true
+  fi
+  for _ in $(seq 1 30); do
+    if system_bus_ok; then
+      echo "ready-manual" > "$SYSTEM_BUS_FILE"
+      return 0
+    fi
+    sleep 0.1
+  done
+
+  echo "unavailable" > "$SYSTEM_BUS_FILE"
+  return 1
 }
 
 wait_display() {
@@ -133,13 +187,11 @@ public_ok() {
 start_xorg_dummy() {
   command -v Xorg >/dev/null 2>&1 || return 1
   command -v cvt >/dev/null 2>&1 || return 1
-
   local model_line mode_name conf
   model_line="$(cvt "$WIDTH" "$HEIGHT" 60 2>/dev/null | sed -n 's/^Modeline[[:space:]]*//p' | head -n1)"
   [ -n "$model_line" ] || return 1
   mode_name="$(printf '%s\n' "$model_line" | awk '{gsub(/\"/,"",$1); print $1}')"
   [ -n "$mode_name" ] || return 1
-
   conf="$BASE/xorg-dummy.conf"
   cat > "$conf" <<EOF
 Section "ServerFlags"
@@ -147,20 +199,17 @@ Section "ServerFlags"
     Option "DontVTSwitch" "true"
     Option "AllowMouseOpenFail" "true"
 EndSection
-
 Section "Device"
     Identifier "DummyDevice"
     Driver "dummy"
     VideoRam 256000
 EndSection
-
 Section "Monitor"
     Identifier "DummyMonitor"
     HorizSync 28.0-100.0
     VertRefresh 40.0-90.0
     Modeline $model_line
 EndSection
-
 Section "Screen"
     Identifier "DummyScreen"
     Device "DummyDevice"
@@ -172,33 +221,33 @@ Section "Screen"
         Virtual $WIDTH $HEIGHT
     EndSubSection
 EndSection
-
 Section "ServerLayout"
     Identifier "DummyLayout"
     Screen "DummyScreen"
 EndSection
 EOF
-
   echo "  tentando Xorg Dummy..."
-  spawn xvfb Xorg "$DISPLAY" \
-    -config "$conf" \
-    -noreset -nolisten tcp -ac \
+  spawn xvfb Xorg "$DISPLAY" -config "$conf" -noreset -nolisten tcp -ac \
     +extension GLX +extension RANDR +extension RENDER +extension XTEST
-
   if wait_display 80; then
     echo "xorg-dummy" > "$DISPLAY_MODE_FILE"
     return 0
   fi
-
-  echo "  Xorg Dummy falhou; usando Xvfb."
   stop_proc xvfb || true
   return 1
 }
 
+echo "[0/5] Preparando D-Bus do sistema..."
+if ensure_system_bus; then
+  echo "  system D-Bus: $(cat "$SYSTEM_BUS_FILE")"
+else
+  echo "  aviso: system D-Bus indisponível; GNOME provavelmente usará fallback."
+fi
+
 echo "[1/5] Iniciando display virtual..."
 if ! start_xorg_dummy; then
-  spawn xvfb Xvfb "$DISPLAY" \
-    -screen 0 "${WIDTH}x${HEIGHT}x24" \
+  echo "  Xorg Dummy falhou; usando Xvfb."
+  spawn xvfb Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" \
     -nolisten tcp -ac -noreset \
     +extension RANDR +extension RENDER +extension XTEST +extension GLX
   if ! wait_display 60; then
@@ -210,30 +259,28 @@ if ! start_xorg_dummy; then
 fi
 
 echo "  display ativo: $(cat "$DISPLAY_MODE_FILE")"
-
-# Garante acesso do usuário gráfico ao servidor X local.
 DISPLAY="$DISPLAY" xhost +SI:localuser:"$SESSION_USER" >/dev/null 2>&1 || true
 
 echo "[2/5] Iniciando ambiente gráfico..."
 DESKTOP_MODE=""
 
 start_gnome_shell() {
-  command -v gnome-session >/dev/null 2>&1 || return 1
+  [ -x /usr/bin/gnome-session ] || return 1
   [ -f /usr/share/gnome-session/sessions/gnome.session ] || return 1
-
-  echo "  tentando GNOME Shell..."
-  spawn_user lxqt env \
+  echo "  tentando GNOME Shell builtin..."
+  spawn_user_log lxqt gnome-shell env \
     XDG_CURRENT_DESKTOP=GNOME \
     XDG_SESSION_DESKTOP=gnome \
     DESKTOP_SESSION=gnome \
     GDMSESSION=gnome \
     GNOME_SHELL_SESSION_MODE=gnome \
+    XDG_MENU_PREFIX=gnome- \
     LIBGL_ALWAYS_SOFTWARE=1 \
     GALLIUM_DRIVER=llvmpipe \
-    dbus-run-session -- gnome-session --session=gnome
+    dbus-launch --exit-with-session \
+    /usr/bin/gnome-session --builtin --disable-acceleration-check --debug --session=gnome
 
-  # GNOME pode levar dezenas de segundos com llvmpipe na primeira inicialização.
-  for _ in $(seq 1 90); do
+  for _ in $(seq 1 100); do
     if pgrep -u "$SESSION_USER" -x gnome-shell >/dev/null 2>&1; then
       sleep 3
       if pgrep -u "$SESSION_USER" -x gnome-shell >/dev/null 2>&1; then
@@ -244,7 +291,6 @@ start_gnome_shell() {
     pid_alive lxqt || break
     sleep 0.5
   done
-
   stop_proc lxqt || true
   pkill -u "$SESSION_USER" -f 'gnome-session|gnome-shell|mutter' >/dev/null 2>&1 || true
   sleep 0.8
@@ -252,19 +298,20 @@ start_gnome_shell() {
 }
 
 start_gnome_flashback() {
-  command -v gnome-session >/dev/null 2>&1 || return 1
+  [ -x /usr/bin/gnome-session ] || return 1
   [ -f /usr/share/gnome-session/sessions/gnome-flashback-metacity.session ] || return 1
-
-  echo "  tentando GNOME Flashback..."
-  spawn_user lxqt env \
+  echo "  tentando GNOME Flashback builtin..."
+  spawn_user_log lxqt gnome-flashback env \
     XDG_CURRENT_DESKTOP='GNOME-Flashback:GNOME' \
     XDG_SESSION_DESKTOP=gnome-flashback-metacity \
     DESKTOP_SESSION=gnome-flashback-metacity \
+    XDG_MENU_PREFIX=gnome-flashback- \
     LIBGL_ALWAYS_SOFTWARE=1 \
     GALLIUM_DRIVER=llvmpipe \
-    dbus-run-session -- gnome-session --session=gnome-flashback-metacity
+    dbus-launch --exit-with-session \
+    /usr/bin/gnome-session --builtin --disable-acceleration-check --debug --session=gnome-flashback-metacity
 
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 80); do
     if pgrep -u "$SESSION_USER" -x metacity >/dev/null 2>&1 || \
        pgrep -u "$SESSION_USER" -x gnome-panel >/dev/null 2>&1; then
       sleep 2
@@ -277,7 +324,6 @@ start_gnome_flashback() {
     pid_alive lxqt || break
     sleep 0.5
   done
-
   stop_proc lxqt || true
   pkill -u "$SESSION_USER" -f 'gnome-session|gnome-panel|metacity' >/dev/null 2>&1 || true
   sleep 0.8
@@ -285,21 +331,21 @@ start_gnome_flashback() {
 }
 
 if ! start_gnome_shell; then
-  echo "  GNOME Shell não estabilizou."
+  echo "  GNOME Shell não estabilizou; veja logs/gnome-shell.log."
   if ! start_gnome_flashback; then
-    echo "  GNOME Flashback também não estabilizou."
+    echo "  GNOME Flashback não estabilizou; veja logs/gnome-flashback.log."
   fi
 fi
 
 if [ -z "$DESKTOP_MODE" ]; then
   DESKTOP_BIN="$(command -v openbox-session || command -v openbox || true)"
   if [ -z "$DESKTOP_BIN" ]; then
-    echo "Nenhum desktop utilizável encontrado. Execute install.sh novamente." >&2
+    echo "Nenhum desktop utilizável encontrado." >&2
     exit 5
   fi
   echo "  iniciando Openbox de emergência..."
-  spawn_user lxqt env XDG_CURRENT_DESKTOP=MaquinaVirtual DESKTOP_SESSION=openbox \
-    dbus-run-session -- "$DESKTOP_BIN"
+  spawn_user_log lxqt openbox env XDG_CURRENT_DESKTOP=MaquinaVirtual DESKTOP_SESSION=openbox \
+    dbus-launch --exit-with-session "$DESKTOP_BIN"
   sleep 1
   DESKTOP_MODE="openbox"
 fi
@@ -313,13 +359,8 @@ echo "[3/5] Iniciando VNC local..."
 VNC_PASS="$BASE/vnc.pass"
 x11vnc -storepasswd "$PASSWORD" "$VNC_PASS" >/dev/null 2>&1
 chmod 600 "$VNC_PASS"
-spawn x11vnc x11vnc \
-  -display "$DISPLAY" \
-  -forever -shared -repeat -noxdamage \
-  -rfbport "$VNC_PORT" \
-  -rfbauth "$VNC_PASS" \
-  -localhost
-
+spawn x11vnc x11vnc -display "$DISPLAY" -forever -shared -repeat -noxdamage \
+  -rfbport "$VNC_PORT" -rfbauth "$VNC_PASS" -localhost
 if ! wait_port "$VNC_PORT" 50; then
   tail -n 40 "$LOGDIR/x11vnc.log" >&2 || true
   exit 6
@@ -341,17 +382,12 @@ if [ -z "$NOVNC_ROOT" ]; then
   echo "Não foi possível localizar os arquivos do noVNC." >&2
   exit 7
 fi
-
-spawn websockify websockify \
-  --web "$NOVNC_ROOT" \
-  "127.0.0.1:${NOVNC_PORT}" \
-  "127.0.0.1:${VNC_PORT}"
-
+spawn websockify websockify --web "$NOVNC_ROOT" \
+  "127.0.0.1:${NOVNC_PORT}" "127.0.0.1:${VNC_PORT}"
 if ! wait_port "$NOVNC_PORT" 50; then
   tail -n 40 "$LOGDIR/websockify.log" >&2 || true
   exit 8
 fi
-
 LOCAL_CODE="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:${NOVNC_PORT}/vnc.html" 2>/dev/null || true)"
 if [[ ! "$LOCAL_CODE" =~ ^2[0-9][0-9]$ ]]; then
   echo "noVNC local não respondeu corretamente (HTTP $LOCAL_CODE)." >&2
@@ -380,7 +416,6 @@ for attempt in 1 2 3; do
   spawn cloudflared "$CLOUDFLARED" tunnel \
     --no-autoupdate --protocol http2 --edge-ip-version 4 \
     --url "http://127.0.0.1:${NOVNC_PORT}"
-
   PUBLIC_URL=""
   for _ in $(seq 1 120); do
     if ! pid_alive cloudflared; then break; fi
@@ -396,7 +431,6 @@ for attempt in 1 2 3; do
   [ "$TUNNEL_OK" -eq 1 ] && break
   sleep 1
 done
-
 if [ "$TUNNEL_OK" -ne 1 ] || [ -z "$PUBLIC_URL" ]; then
   echo "Não foi possível estabelecer um túnel HTTPS saudável." >&2
   tail -n 80 "$LOGDIR/cloudflared.log" >&2 || true
@@ -404,13 +438,10 @@ if [ "$TUNNEL_OK" -ne 1 ] || [ -z "$PUBLIC_URL" ]; then
 fi
 
 DISPLAY_MODE="$(cat "$DISPLAY_MODE_FILE" 2>/dev/null || echo unknown)"
-export MV_PUBLIC_URL="$PUBLIC_URL"
-export MV_PASSWORD="$PASSWORD"
-export MV_RESOLUTION="$RESOLUTION"
-export MV_SESSION_FILE="$SESSION_FILE"
-export MV_DESKTOP_MODE="$DESKTOP_MODE"
-export MV_DISPLAY_MODE="$DISPLAY_MODE"
-export MV_SESSION_USER="$SESSION_USER"
+SYSTEM_BUS_MODE="$(cat "$SYSTEM_BUS_FILE" 2>/dev/null || echo unknown)"
+export MV_PUBLIC_URL="$PUBLIC_URL" MV_PASSWORD="$PASSWORD" MV_RESOLUTION="$RESOLUTION"
+export MV_SESSION_FILE="$SESSION_FILE" MV_DESKTOP_MODE="$DESKTOP_MODE"
+export MV_DISPLAY_MODE="$DISPLAY_MODE" MV_SESSION_USER="$SESSION_USER" MV_SYSTEM_BUS="$SYSTEM_BUS_MODE"
 python3 - <<'PY'
 import json, os, time, urllib.parse
 base = os.environ["MV_PUBLIC_URL"].rstrip("/")
@@ -419,32 +450,24 @@ resolution = os.environ["MV_RESOLUTION"]
 desktop = os.environ["MV_DESKTOP_MODE"]
 display_mode = os.environ["MV_DISPLAY_MODE"]
 user = os.environ["MV_SESSION_USER"]
+system_bus = os.environ["MV_SYSTEM_BUS"]
 viewer = base + "/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=websockify"
-deep = "maquinavirtual://connect?" + urllib.parse.urlencode({
-    "url": base,
-    "password": password,
-    "resolution": resolution,
-})
+deep = "maquinavirtual://connect?" + urllib.parse.urlencode({"url": base, "password": password, "resolution": resolution})
 data = {
-    "public_url": base,
-    "viewer_url": viewer,
-    "password": password,
-    "resolution": resolution,
-    "deep_link": deep,
-    "desktop_mode": desktop,
-    "display_mode": display_mode,
-    "session_user": user,
-    "created_at": int(time.time()),
-    "tunnel_verified": True,
+  "public_url": base, "viewer_url": viewer, "password": password,
+  "resolution": resolution, "deep_link": deep, "desktop_mode": desktop,
+  "display_mode": display_mode, "session_user": user, "system_bus": system_bus,
+  "created_at": int(time.time()), "tunnel_verified": True,
 }
 with open(os.environ["MV_SESSION_FILE"], "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)
 print(json.dumps(data, ensure_ascii=False))
 PY
-
 chmod 600 "$SESSION_FILE"
+
 echo
 echo "[Máquina Virtual] Sessão pronta e túnel verificado."
+echo "System D-Bus: $SYSTEM_BUS_MODE"
 echo "Display: $DISPLAY_MODE"
 echo "Desktop: $DESKTOP_MODE"
 echo "Usuário: $SESSION_USER"

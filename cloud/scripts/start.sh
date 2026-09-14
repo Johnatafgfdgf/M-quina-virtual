@@ -12,12 +12,20 @@ BASE=/tmp/maquina-virtual
 LOGDIR="$BASE/logs"
 PIDDIR="$BASE/pids"
 SESSION_FILE="$BASE/session.json"
+DISPLAY_MODE_FILE="$BASE/display_mode"
 
 mkdir -p "$LOGDIR" "$PIDDIR"
 chmod 700 "$BASE"
 
 if [[ ! "$RESOLUTION" =~ ^[0-9]+x[0-9]+$ ]]; then
   echo "Resolução inválida: $RESOLUTION" >&2
+  exit 2
+fi
+
+WIDTH="${RESOLUTION%x*}"
+HEIGHT="${RESOLUTION#*x}"
+if [ "$WIDTH" -lt 800 ] || [ "$HEIGHT" -lt 480 ] || [ "$WIDTH" -gt 3840 ] || [ "$HEIGHT" -gt 2160 ]; then
+  echo "Resolução fora do intervalo suportado: $RESOLUTION" >&2
   exit 2
 fi
 
@@ -44,12 +52,8 @@ RUNTIME_DIR="/tmp/runtime-$SESSION_USER"
 mkdir -p "$RUNTIME_DIR"
 chown "$SESSION_USER:$SESSION_USER" "$RUNTIME_DIR"
 chmod 700 "$RUNTIME_DIR"
-
-# A senha temporária da sessão também funciona para sudo dentro do desktop.
 printf '%s:%s\n' "$SESSION_USER" "$PASSWORD" | chpasswd
 
-WIDTH="${RESOLUTION%x*}"
-HEIGHT="${RESOLUTION#*x}"
 export DISPLAY
 
 spawn() {
@@ -65,7 +69,8 @@ spawn_user() {
   setsid nohup runuser -u "$SESSION_USER" -- env \
     HOME="$SESSION_HOME" USER="$SESSION_USER" LOGNAME="$SESSION_USER" \
     DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
-    XDG_SESSION_TYPE=x11 GDK_BACKEND=x11 \
+    XDG_SESSION_TYPE=x11 XDG_SESSION_CLASS=user GDK_BACKEND=x11 \
+    NO_AT_BRIDGE=1 \
     "$@" >"$LOGDIR/$name.log" 2>&1 < /dev/null &
   echo $! > "$PIDDIR/$name.pid"
 }
@@ -95,6 +100,17 @@ pid_alive() {
   [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 
+wait_display() {
+  local attempts="${1:-60}"
+  for _ in $(seq 1 "$attempts"); do
+    if DISPLAY="$DISPLAY" xdpyinfo >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
 wait_port() {
   local port="$1"
   local attempts="${2:-40}"
@@ -114,71 +130,167 @@ public_ok() {
   [[ "$code" =~ ^2[0-9][0-9]$ ]]
 }
 
-echo "[1/5] Iniciando display X virtual..."
-spawn xvfb Xvfb "$DISPLAY" \
-  -screen 0 "${WIDTH}x${HEIGHT}x24" \
-  -nolisten tcp -ac -noreset \
-  +extension RANDR +extension RENDER +extension XTEST +extension GLX
+start_xorg_dummy() {
+  command -v Xorg >/dev/null 2>&1 || return 1
+  command -v cvt >/dev/null 2>&1 || return 1
 
-for _ in $(seq 1 40); do
-  [ -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ] && break
-  sleep 0.25
-done
-if [ ! -S "/tmp/.X11-unix/X${DISPLAY_NUM}" ]; then
-  tail -n 30 "$LOGDIR/xvfb.log" >&2 || true
-  exit 4
+  local model_line mode_name conf
+  model_line="$(cvt "$WIDTH" "$HEIGHT" 60 2>/dev/null | sed -n 's/^Modeline[[:space:]]*//p' | head -n1)"
+  [ -n "$model_line" ] || return 1
+  mode_name="$(printf '%s\n' "$model_line" | awk '{gsub(/\"/,"",$1); print $1}')"
+  [ -n "$mode_name" ] || return 1
+
+  conf="$BASE/xorg-dummy.conf"
+  cat > "$conf" <<EOF
+Section "ServerFlags"
+    Option "AutoAddDevices" "false"
+    Option "DontVTSwitch" "true"
+    Option "AllowMouseOpenFail" "true"
+EndSection
+
+Section "Device"
+    Identifier "DummyDevice"
+    Driver "dummy"
+    VideoRam 256000
+EndSection
+
+Section "Monitor"
+    Identifier "DummyMonitor"
+    HorizSync 28.0-100.0
+    VertRefresh 40.0-90.0
+    Modeline $model_line
+EndSection
+
+Section "Screen"
+    Identifier "DummyScreen"
+    Device "DummyDevice"
+    Monitor "DummyMonitor"
+    DefaultDepth 24
+    SubSection "Display"
+        Depth 24
+        Modes "$mode_name"
+        Virtual $WIDTH $HEIGHT
+    EndSubSection
+EndSection
+
+Section "ServerLayout"
+    Identifier "DummyLayout"
+    Screen "DummyScreen"
+EndSection
+EOF
+
+  echo "  tentando Xorg Dummy..."
+  spawn xvfb Xorg "$DISPLAY" \
+    -config "$conf" \
+    -noreset -nolisten tcp -ac \
+    +extension GLX +extension RANDR +extension RENDER +extension XTEST
+
+  if wait_display 80; then
+    echo "xorg-dummy" > "$DISPLAY_MODE_FILE"
+    return 0
+  fi
+
+  echo "  Xorg Dummy falhou; usando Xvfb."
+  stop_proc xvfb || true
+  return 1
+}
+
+echo "[1/5] Iniciando display virtual..."
+if ! start_xorg_dummy; then
+  spawn xvfb Xvfb "$DISPLAY" \
+    -screen 0 "${WIDTH}x${HEIGHT}x24" \
+    -nolisten tcp -ac -noreset \
+    +extension RANDR +extension RENDER +extension XTEST +extension GLX
+  if ! wait_display 60; then
+    echo "Nenhum display virtual conseguiu iniciar." >&2
+    tail -n 60 "$LOGDIR/xvfb.log" >&2 || true
+    exit 4
+  fi
+  echo "xvfb" > "$DISPLAY_MODE_FILE"
 fi
+
+echo "  display ativo: $(cat "$DISPLAY_MODE_FILE")"
+
+# Garante acesso do usuário gráfico ao servidor X local.
+DISPLAY="$DISPLAY" xhost +SI:localuser:"$SESSION_USER" >/dev/null 2>&1 || true
 
 echo "[2/5] Iniciando ambiente gráfico..."
 DESKTOP_MODE=""
 
-# 1) GNOME Shell completo. Xvfb não oferece aceleração real, então usamos llvmpipe nesta fase.
-if command -v gnome-session >/dev/null 2>&1 && [ -f /usr/share/gnome-session/sessions/gnome.session ]; then
-  echo "  tentando GNOME completo..."
+start_gnome_shell() {
+  command -v gnome-session >/dev/null 2>&1 || return 1
+  [ -f /usr/share/gnome-session/sessions/gnome.session ] || return 1
+
+  echo "  tentando GNOME Shell..."
   spawn_user lxqt env \
-    XDG_CURRENT_DESKTOP=GNOME DESKTOP_SESSION=gnome \
-    LIBGL_ALWAYS_SOFTWARE=1 CLUTTER_BACKEND=x11 \
+    XDG_CURRENT_DESKTOP=GNOME \
+    XDG_SESSION_DESKTOP=gnome \
+    DESKTOP_SESSION=gnome \
+    GDMSESSION=gnome \
+    GNOME_SHELL_SESSION_MODE=gnome \
+    LIBGL_ALWAYS_SOFTWARE=1 \
+    GALLIUM_DRIVER=llvmpipe \
     dbus-run-session -- gnome-session --session=gnome
-  for _ in $(seq 1 24); do
+
+  # GNOME pode levar dezenas de segundos com llvmpipe na primeira inicialização.
+  for _ in $(seq 1 90); do
     if pgrep -u "$SESSION_USER" -x gnome-shell >/dev/null 2>&1; then
-      DESKTOP_MODE="gnome"
-      break
+      sleep 3
+      if pgrep -u "$SESSION_USER" -x gnome-shell >/dev/null 2>&1; then
+        DESKTOP_MODE="gnome"
+        return 0
+      fi
     fi
     pid_alive lxqt || break
     sleep 0.5
   done
-  if [ -z "$DESKTOP_MODE" ]; then
-    echo "  GNOME Shell não estabilizou; usando fallback GNOME."
-    stop_proc lxqt || true
-    pkill -u "$SESSION_USER" -f 'gnome-session|gnome-shell|mutter' >/dev/null 2>&1 || true
-    sleep 0.5
-  fi
-fi
 
-# 2) GNOME Flashback + Metacity. Visual GNOME, bem mais tolerante a displays headless.
-if [ -z "$DESKTOP_MODE" ] && command -v gnome-session >/dev/null 2>&1 && [ -f /usr/share/gnome-session/sessions/gnome-flashback-metacity.session ]; then
+  stop_proc lxqt || true
+  pkill -u "$SESSION_USER" -f 'gnome-session|gnome-shell|mutter' >/dev/null 2>&1 || true
+  sleep 0.8
+  return 1
+}
+
+start_gnome_flashback() {
+  command -v gnome-session >/dev/null 2>&1 || return 1
+  [ -f /usr/share/gnome-session/sessions/gnome-flashback-metacity.session ] || return 1
+
   echo "  tentando GNOME Flashback..."
   spawn_user lxqt env \
-    XDG_CURRENT_DESKTOP='GNOME-Flashback:GNOME' DESKTOP_SESSION=gnome-flashback-metacity \
+    XDG_CURRENT_DESKTOP='GNOME-Flashback:GNOME' \
+    XDG_SESSION_DESKTOP=gnome-flashback-metacity \
+    DESKTOP_SESSION=gnome-flashback-metacity \
     LIBGL_ALWAYS_SOFTWARE=1 \
+    GALLIUM_DRIVER=llvmpipe \
     dbus-run-session -- gnome-session --session=gnome-flashback-metacity
-  for _ in $(seq 1 24); do
-    if pgrep -u "$SESSION_USER" -x metacity >/dev/null 2>&1 || pgrep -u "$SESSION_USER" -x gnome-panel >/dev/null 2>&1; then
-      DESKTOP_MODE="gnome-flashback"
-      break
+
+  for _ in $(seq 1 60); do
+    if pgrep -u "$SESSION_USER" -x metacity >/dev/null 2>&1 || \
+       pgrep -u "$SESSION_USER" -x gnome-panel >/dev/null 2>&1; then
+      sleep 2
+      if pgrep -u "$SESSION_USER" -x metacity >/dev/null 2>&1 || \
+         pgrep -u "$SESSION_USER" -x gnome-panel >/dev/null 2>&1; then
+        DESKTOP_MODE="gnome-flashback"
+        return 0
+      fi
     fi
     pid_alive lxqt || break
     sleep 0.5
   done
-  if [ -z "$DESKTOP_MODE" ]; then
-    echo "  GNOME Flashback não estabilizou; usando fallback leve."
-    stop_proc lxqt || true
-    pkill -u "$SESSION_USER" -f 'gnome-session|gnome-panel|metacity' >/dev/null 2>&1 || true
-    sleep 0.5
+
+  stop_proc lxqt || true
+  pkill -u "$SESSION_USER" -f 'gnome-session|gnome-panel|metacity' >/dev/null 2>&1 || true
+  sleep 0.8
+  return 1
+}
+
+if ! start_gnome_shell; then
+  echo "  GNOME Shell não estabilizou."
+  if ! start_gnome_flashback; then
+    echo "  GNOME Flashback também não estabilizou."
   fi
 fi
 
-# 3) Último fallback. Mantém a máquina acessível mesmo se GNOME não funcionar naquele runtime.
 if [ -z "$DESKTOP_MODE" ]; then
   DESKTOP_BIN="$(command -v openbox-session || command -v openbox || true)"
   if [ -z "$DESKTOP_BIN" ]; then
@@ -291,11 +403,13 @@ if [ "$TUNNEL_OK" -ne 1 ] || [ -z "$PUBLIC_URL" ]; then
   exit 10
 fi
 
+DISPLAY_MODE="$(cat "$DISPLAY_MODE_FILE" 2>/dev/null || echo unknown)"
 export MV_PUBLIC_URL="$PUBLIC_URL"
 export MV_PASSWORD="$PASSWORD"
 export MV_RESOLUTION="$RESOLUTION"
 export MV_SESSION_FILE="$SESSION_FILE"
 export MV_DESKTOP_MODE="$DESKTOP_MODE"
+export MV_DISPLAY_MODE="$DISPLAY_MODE"
 export MV_SESSION_USER="$SESSION_USER"
 python3 - <<'PY'
 import json, os, time, urllib.parse
@@ -303,6 +417,7 @@ base = os.environ["MV_PUBLIC_URL"].rstrip("/")
 password = os.environ["MV_PASSWORD"]
 resolution = os.environ["MV_RESOLUTION"]
 desktop = os.environ["MV_DESKTOP_MODE"]
+display_mode = os.environ["MV_DISPLAY_MODE"]
 user = os.environ["MV_SESSION_USER"]
 viewer = base + "/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=websockify"
 deep = "maquinavirtual://connect?" + urllib.parse.urlencode({
@@ -317,6 +432,7 @@ data = {
     "resolution": resolution,
     "deep_link": deep,
     "desktop_mode": desktop,
+    "display_mode": display_mode,
     "session_user": user,
     "created_at": int(time.time()),
     "tunnel_verified": True,
@@ -329,6 +445,7 @@ PY
 chmod 600 "$SESSION_FILE"
 echo
 echo "[Máquina Virtual] Sessão pronta e túnel verificado."
+echo "Display: $DISPLAY_MODE"
 echo "Desktop: $DESKTOP_MODE"
 echo "Usuário: $SESSION_USER"
 echo "URL: $PUBLIC_URL"

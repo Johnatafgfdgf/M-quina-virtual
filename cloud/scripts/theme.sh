@@ -28,13 +28,25 @@ as_user() {
   runuser -u "$SESSION_USER" -- env \
     HOME="$USER_HOME" USER="$SESSION_USER" LOGNAME="$SESSION_USER" \
     DISPLAY="$DISPLAY" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+    XDG_SESSION_TYPE=x11 GDK_BACKEND=x11 \
     "$@"
 }
+
+if command -v google-chrome >/dev/null 2>&1; then
+  BROWSER_CMD="google-chrome --disable-dev-shm-usage"
+  BROWSER_DESKTOP="google-chrome.desktop"
+elif command -v epiphany >/dev/null 2>&1; then
+  BROWSER_CMD="epiphany"
+  BROWSER_DESKTOP="org.gnome.Epiphany.desktop"
+else
+  BROWSER_CMD="falkon"
+  BROWSER_DESKTOP="org.kde.falkon.desktop"
+fi
 
 if [[ "$MODE" == gnome* ]]; then
   echo "[Máquina Virtual] Aplicando visual GNOME ($MODE)..."
 
-  # As preferências são gravadas no perfil do usuário e valem para GNOME completo e Flashback.
+  FAVORITES="['org.gnome.Nautilus.desktop','org.gnome.Terminal.desktop','$BROWSER_DESKTOP','org.gnome.Settings.desktop']"
   as_user dbus-run-session -- bash -lc "
     gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' 2>/dev/null || true
     gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-dark' 2>/dev/null || gsettings set org.gnome.desktop.interface gtk-theme 'Adwaita-dark' 2>/dev/null || true
@@ -45,10 +57,9 @@ if [[ "$MODE" == gnome* ]]; then
     gsettings set org.gnome.desktop.background picture-options 'zoom' 2>/dev/null || true
     gsettings set org.gnome.desktop.background picture-uri 'file://$WALLPAPER_PNG' 2>/dev/null || true
     gsettings set org.gnome.desktop.background picture-uri-dark 'file://$WALLPAPER_PNG' 2>/dev/null || true
-    gsettings set org.gnome.shell favorite-apps \"['org.gnome.Nautilus.desktop','org.gnome.Terminal.desktop','org.gnome.Epiphany.desktop','org.gnome.Settings.desktop']\" 2>/dev/null || true
+    gsettings set org.gnome.shell favorite-apps \"$FAVORITES\" 2>/dev/null || true
   " >/dev/null 2>&1 || true
 
-  # Wallpaper imediato caso a sessão já tenha iniciado antes do dconf ser atualizado.
   if command -v feh >/dev/null 2>&1 && [ -f "$WALLPAPER_PNG" ] && [[ "$MODE" == *flashback* ]]; then
     as_user feh --no-fehbg --bg-fill "$WALLPAPER_PNG" >/dev/null 2>&1 &
   fi
@@ -80,11 +91,11 @@ Exec=qterminal
 Icon=utilities-terminal
 Terminal=false
 EOF
-cat > "$LAUNCH_DIR/browser.desktop" <<'EOF'
+cat > "$LAUNCH_DIR/browser.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Navegador
-Exec=falkon
+Exec=$BROWSER_CMD
 Icon=web-browser
 Terminal=false
 EOF

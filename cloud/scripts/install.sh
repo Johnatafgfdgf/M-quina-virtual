@@ -26,20 +26,16 @@ apt-get install -y --no-install-recommends \
   xdg-desktop-portal xdg-desktop-portal-gnome \
   epiphany-browser eog evince file-roller
 
-# GNOME Flashback continua como primeiro fallback porque preserva a linguagem
-# do GNOME e tolera ambientes headless melhor que Mutter/GNOME Shell.
 apt-get install -y --no-install-recommends \
   gnome-tweaks gnome-session-flashback gnome-panel metacity \
   adwaita-icon-theme-full yaru-theme-gtk yaru-theme-icon \
   || true
 
-# Sessão Ubuntu/dock são opcionais.
 apt-get install -y --no-install-recommends \
   ubuntu-session gnome-shell-extension-ubuntu-dock \
   || apt-get install -y --no-install-recommends gnome-shell-extension-dashtodock \
   || true
 
-# Google Chrome é o navegador principal quando o .deb for compatível.
 TMP_CHROME=/tmp/google-chrome-stable_current_amd64.deb
 if [ "$(dpkg --print-architecture)" = "amd64" ]; then
   if curl -fL --retry 3 \
@@ -50,53 +46,57 @@ if [ "$(dpkg --print-architecture)" = "amd64" ]; then
   fi
 fi
 
-# Último fallback, só para manter a máquina acessível se GNOME falhar.
 apt-get install -y --no-install-recommends \
   openbox tint2 feh librsvg2-bin papirus-icon-theme python3-xdg \
   qterminal pcmanfm-qt featherpad falkon \
   || true
 
-# GNOME 46 (Ubuntu 24.04) removeu --builtin/--systemd. O start.sh ainda usa
-# --builtin por compatibilidade com imagens GNOME antigas. Este shim filtra
-# opções ausentes na versão instalada e, se o gnome-session moderno não puder
-# montar a sessão fora do GDM/systemd --user, tenta o GNOME Shell diretamente.
+# O GNOME 46 do Ubuntu 24.04 depende fortemente da sessão systemd/GDM.
+# No Colab, o gnome-session chega a subir e depois derruba a sessão inteira.
+# Para o modo GNOME principal, usamos o GNOME Shell X11 diretamente, que é uma
+# opção suportada pelo próprio gnome-shell. Flashback continua usando o
+# gnome-session real e permanece como fallback confiável.
 GNOME_SHIM_DIR=/usr/libexec/maquina-virtual
-GNOME_REAL="$GNOME_SHIM_DIR/gnome-session-real"
 mkdir -p "$GNOME_SHIM_DIR"
 
-if [ ! -x "$GNOME_REAL" ]; then
-  RESOLVED="$(readlink -f /usr/bin/gnome-session 2>/dev/null || true)"
-  if [ -n "$RESOLVED" ] && [ "$RESOLVED" != "/usr/bin/gnome-session" ] && [ -x "$RESOLVED" ]; then
-    ln -sf "$RESOLVED" "$GNOME_REAL"
-  elif [ -x /usr/bin/gnome-session ]; then
-    cp -a /usr/bin/gnome-session "$GNOME_REAL"
+if [ -x /usr/libexec/gnome-session-binary ]; then
+  GNOME_REAL=/usr/libexec/gnome-session-binary
+else
+  GNOME_REAL="$GNOME_SHIM_DIR/gnome-session-real"
+  if [ ! -x "$GNOME_REAL" ]; then
+    CURRENT="$(readlink -f /usr/bin/gnome-session 2>/dev/null || true)"
+    if [ -n "$CURRENT" ] && [ -x "$CURRENT" ]; then
+      cp -a "$CURRENT" "$GNOME_REAL"
+    fi
   fi
 fi
 
-if [ -x "$GNOME_REAL" ]; then
-  rm -f /usr/bin/gnome-session
-  cat > /usr/bin/gnome-session <<'EOF'
+cat > /usr/bin/gnome-session <<'EOF'
 #!/usr/bin/env bash
 set -u
-REAL=/usr/libexec/maquina-virtual/gnome-session-real
+
+REAL="/usr/libexec/gnome-session-binary"
+if [ ! -x "$REAL" ]; then
+  REAL="/usr/libexec/maquina-virtual/gnome-session-real"
+fi
+
 SESSION_NAME=""
 ARGS=()
 HELP="$($REAL --help 2>&1 || true)"
 
 for arg in "$@"; do
   case "$arg" in
+    --session=*)
+      SESSION_NAME="${arg#--session=}"
+      ARGS+=("$arg")
+      ;;
     --builtin|--systemd)
-      # Removidos no GNOME 46. Ignorar mantém compatibilidade com versões novas.
-      continue
+      # Removidos no GNOME 46.
       ;;
     --disable-acceleration-check)
       if printf '%s\n' "$HELP" | grep -q -- '--disable-acceleration-check'; then
         ARGS+=("$arg")
       fi
-      ;;
-    --session=*)
-      SESSION_NAME="${arg#--session=}"
-      ARGS+=("$arg")
       ;;
     *)
       ARGS+=("$arg")
@@ -104,42 +104,36 @@ for arg in "$@"; do
   esac
 done
 
-"$REAL" "${ARGS[@]}"
-RC=$?
+if [ "$SESSION_NAME" = "gnome" ]; then
+  echo "[Máquina Virtual] Iniciando GNOME Shell X11 direto." >&2
 
-# Se o GNOME moderno saiu sem deixar o Shell vivo, fazemos um boot direto do
-# Shell X11. Isso evita depender de um login GDM tradicional no Colab.
-if [ "$SESSION_NAME" = "gnome" ] && ! pgrep -u "$(id -u)" -x gnome-shell >/dev/null 2>&1; then
-  echo "[Máquina Virtual] gnome-session saiu (rc=$RC); tentando GNOME Shell X11 direto." >&2
   if command -v gnome-keyring-daemon >/dev/null 2>&1; then
     eval "$(gnome-keyring-daemon --start --components=secrets 2>/dev/null || true)" || true
   fi
-  for svc in /usr/libexec/gsd-xsettings /usr/libexec/gsd-keyboard /usr/libexec/gsd-media-keys; do
+
+  # Serviços essenciais que normalmente seriam iniciados pelo gnome-session.
+  for svc in \
+    /usr/libexec/gsd-xsettings \
+    /usr/libexec/gsd-keyboard \
+    /usr/libexec/gsd-media-keys \
+    /usr/libexec/gsd-a11y-settings \
+    /usr/libexec/gsd-clipboard; do
     if [ -x "$svc" ]; then
       "$svc" >/dev/null 2>&1 &
     fi
   done
+
+  export XDG_CURRENT_DESKTOP=GNOME
+  export XDG_SESSION_DESKTOP=gnome
+  export DESKTOP_SESSION=gnome
+  export GNOME_SHELL_SESSION_MODE=gnome
   exec /usr/bin/gnome-shell --x11 --sm-disable
 fi
 
-# Flashback manual como fallback GNOME antes de o start.sh cair para Openbox.
-if [ "$SESSION_NAME" = "gnome-flashback-metacity" ] && \
-   ! pgrep -u "$(id -u)" -x metacity >/dev/null 2>&1 && \
-   ! pgrep -u "$(id -u)" -x gnome-panel >/dev/null 2>&1; then
-  echo "[Máquina Virtual] gnome-session Flashback saiu (rc=$RC); tentando painel GNOME manual." >&2
-  if command -v metacity >/dev/null 2>&1 && command -v gnome-panel >/dev/null 2>&1; then
-    metacity --replace >/dev/null 2>&1 &
-    gnome-panel >/dev/null 2>&1 &
-    wait
-  fi
-fi
-
-exit "$RC"
+exec "$REAL" "${ARGS[@]}"
 EOF
-  chmod 755 /usr/bin/gnome-session
-fi
+chmod 755 /usr/bin/gnome-session
 
-# Usuário gráfico real.
 if ! id -u "$SESSION_USER" >/dev/null 2>&1; then
   useradd -m -s /bin/bash "$SESSION_USER"
 fi
@@ -149,16 +143,26 @@ for group in sudo audio video render; do
   fi
 done
 
-# IDs e diretórios esperados pelo D-Bus/GNOME.
 dbus-uuidgen --ensure=/etc/machine-id || true
 mkdir -p /var/lib/dbus /run/dbus
 if [ ! -e /var/lib/dbus/machine-id ]; then
-  ln -s /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || cp /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
+  ln -s /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || \
+    cp /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
 fi
 
 SESSION_HOME="$(getent passwd "$SESSION_USER" | cut -d: -f6)"
-mkdir -p "$SESSION_HOME/.config" "$SESSION_HOME/.local/share" "$SESSION_HOME/Downloads"
-chown -R "$SESSION_USER:$SESSION_USER" "$SESSION_HOME/.config" "$SESSION_HOME/.local" "$SESSION_HOME/Downloads"
+mkdir -p \
+  "$SESSION_HOME/.config" \
+  "$SESSION_HOME/.local/share" \
+  "$SESSION_HOME/Downloads" \
+  "$SESSION_HOME/Desktop" \
+  "$SESSION_HOME/Documents" \
+  "$SESSION_HOME/Pictures" \
+  "$SESSION_HOME/Videos"
+chown -R "$SESSION_USER:$SESSION_USER" \
+  "$SESSION_HOME/.config" "$SESSION_HOME/.local" \
+  "$SESSION_HOME/Downloads" "$SESSION_HOME/Desktop" \
+  "$SESSION_HOME/Documents" "$SESSION_HOME/Pictures" "$SESSION_HOME/Videos"
 runuser -u "$SESSION_USER" -- xdg-user-dirs-update >/dev/null 2>&1 || true
 
 mkdir -p /tmp/maquina-virtual/{logs,pids}
@@ -166,8 +170,8 @@ chmod 700 /tmp/maquina-virtual
 
 echo "[Máquina Virtual] Instalação concluída."
 echo "Display prioritário: Xorg Dummy"
-echo "Desktop prioritário: GNOME Shell"
-echo "Fallbacks: GNOME Shell X11 direto -> GNOME Flashback -> Openbox"
+echo "Desktop prioritário: GNOME Shell X11 direto"
+echo "Fallbacks: GNOME Flashback -> Openbox"
 if command -v google-chrome >/dev/null 2>&1; then
   echo "Navegador principal: Google Chrome"
 else

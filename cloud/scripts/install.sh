@@ -12,7 +12,7 @@ apt-get install -y --no-install-recommends \
   xserver-xorg-core xserver-xorg-video-dummy xserver-xorg-input-libinput xcvt \
   xvfb x11-xserver-utils xauth \
   dbus dbus-daemon dbus-x11 dbus-user-session libpam-systemd policykit-1 systemd \
-  xdg-user-dirs xdg-utils \
+  xdg-user-dirs xdg-utils dconf-cli \
   x11vnc novnc websockify \
   curl wget ca-certificates gnupg procps iproute2 openssl sudo \
   fonts-noto fonts-dejavu fonts-liberation fonts-cantarell \
@@ -24,6 +24,7 @@ apt-get install -y --no-install-recommends \
   gnome-terminal nautilus gnome-control-center gsettings-desktop-schemas \
   gnome-backgrounds gnome-themes-extra gnome-keyring \
   xdg-desktop-portal xdg-desktop-portal-gnome \
+  gvfs-backends gvfs-fuse \
   epiphany-browser eog evince file-roller
 
 apt-get install -y --no-install-recommends \
@@ -131,8 +132,6 @@ login1_ready() {
 # Força uma tentativa de ativação agora para que o problema apareça durante a
 # instalação, em vez de só quando o GNOME Shell iniciar.
 if ! login1_ready; then
-  # Última tentativa explícita. Se o serviço D-Bus puder ativar o launcher,
-  # este comando faz o bus iniciar o logind real.
   dbus-send --system --type=method_call \
     --dest=org.freedesktop.login1 /org/freedesktop/login1 \
     org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1 || true
@@ -148,10 +147,6 @@ fi
 # ---------------------------------------------------------------------------
 # GNOME 46 em X11
 # ---------------------------------------------------------------------------
-# O GNOME completo iniciado pelo gnome-session costuma desmontar a sessão no
-# Colab porque não existe um login GDM tradicional. Para o perfil principal,
-# iniciamos o GNOME Shell X11 diretamente. Flashback continua usando o
-# gnome-session real e é o fallback estável.
 GNOME_SHIM_DIR=/usr/libexec/maquina-virtual
 mkdir -p "$GNOME_SHIM_DIR"
 

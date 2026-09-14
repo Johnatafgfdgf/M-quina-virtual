@@ -7,6 +7,7 @@ SESSION="$BASE/session.json"
 LOGDIR="$BASE/logs"
 MODE_FILE="$BASE/desktop_mode"
 DISPLAY_MODE_FILE="$BASE/display_mode"
+SYSTEM_BUS_FILE="$BASE/system_bus"
 
 check_pid() {
   local name="$1"
@@ -23,6 +24,11 @@ check_pid() {
   return 1
 }
 
+system_bus_ok() {
+  dbus-send --system --type=method_call --dest=org.freedesktop.DBus \
+    / org.freedesktop.DBus.ListNames >/dev/null 2>&1
+}
+
 echo "=== Máquina Virtual ==="
 for name in xvfb lxqt x11vnc websockify cloudflared; do
   check_pid "$name" || true
@@ -32,6 +38,11 @@ echo
 echo "=== Ambiente gráfico ==="
 echo "Display server: $(cat "$DISPLAY_MODE_FILE" 2>/dev/null || echo desconhecido)"
 echo "Desktop:        $(cat "$MODE_FILE" 2>/dev/null || echo desconhecido)"
+if system_bus_ok; then
+  echo "System D-Bus:   ✅ ativo ($(cat "$SYSTEM_BUS_FILE" 2>/dev/null || echo existente))"
+else
+  echo "System D-Bus:   ❌ indisponível"
+fi
 if command -v google-chrome >/dev/null 2>&1; then
   echo "Navegador:      Google Chrome"
 elif command -v epiphany >/dev/null 2>&1; then
@@ -45,7 +56,6 @@ fi
 echo
 echo "=== Portas locais ==="
 ss -ltn 2>/dev/null | grep -E ':5900|:6080' || true
-
 LOCAL_CODE="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:6080/vnc.html 2>/dev/null || true)"
 if [[ "$LOCAL_CODE" =~ ^2[0-9][0-9]$ ]]; then
   echo "✅ noVNC local HTTP $LOCAL_CODE"
@@ -65,11 +75,7 @@ if command -v glxinfo >/dev/null 2>&1; then
 fi
 if command -v vulkaninfo >/dev/null 2>&1; then
   VULKAN_DEVICE="$(vulkaninfo --summary 2>/dev/null | grep -m1 'deviceName' | sed 's/.*= *//' || true)"
-  if [ -n "$VULKAN_DEVICE" ]; then
-    echo "Vulkan: $VULKAN_DEVICE"
-  else
-    echo "Vulkan: não disponível"
-  fi
+  [ -n "$VULKAN_DEVICE" ] && echo "Vulkan: $VULKAN_DEVICE" || echo "Vulkan: não disponível"
 fi
 
 echo
@@ -78,55 +84,58 @@ if [ -f "$SESSION" ]; then
   URL="$(python3 - <<'PY'
 import json
 p='/tmp/maquina-virtual/session.json'
-with open(p, encoding='utf-8') as f:
-    d=json.load(f)
+with open(p, encoding='utf-8') as f: d=json.load(f)
 print(d.get('public_url',''))
 PY
 )"
   python3 - <<'PY'
 import json
 p='/tmp/maquina-virtual/session.json'
-with open(p, encoding='utf-8') as f:
-    d=json.load(f)
+with open(p, encoding='utf-8') as f: d=json.load(f)
 print('URL:', d.get('public_url',''))
 print('Resolução:', d.get('resolution',''))
 print('Display:', d.get('display_mode',''))
 print('Desktop:', d.get('desktop_mode',''))
 print('Usuário:', d.get('session_user',''))
+print('System D-Bus:', d.get('system_bus',''))
 print('Túnel verificado ao criar:', d.get('tunnel_verified', False))
 print('Deep link:', d.get('deep_link',''))
 PY
   if [ -n "$URL" ]; then
     PUBLIC_CODE="$(curl -L -sS --max-time 8 -o /dev/null -w '%{http_code}' "${URL%/}/vnc.html" 2>/dev/null || true)"
-    if [[ "$PUBLIC_CODE" =~ ^2[0-9][0-9]$ ]]; then
-      echo "✅ túnel público HTTP $PUBLIC_CODE"
-    else
-      echo "❌ túnel público HTTP ${PUBLIC_CODE:-sem resposta}"
-    fi
+    [[ "$PUBLIC_CODE" =~ ^2[0-9][0-9]$ ]] && echo "✅ túnel público HTTP $PUBLIC_CODE" || echo "❌ túnel público HTTP ${PUBLIC_CODE:-sem resposta}"
   fi
 else
   echo "Nenhuma sessão ativa registrada."
 fi
 
 echo
-echo "=== Diagnóstico GNOME ==="
-if [ -f "$LOGDIR/gnome-session.log" ]; then
-  tail -n 80 "$LOGDIR/gnome-session.log"
+echo "=== GNOME Shell ==="
+if [ -s "$LOGDIR/gnome-shell.log" ]; then
+  tail -n 100 "$LOGDIR/gnome-shell.log"
 else
-  echo "Sem log persistente do GNOME. Rode novamente Instalar desktop e Iniciar sessão."
+  echo "Sem saída do GNOME Shell."
 fi
 
 echo
-echo "=== Desktop ativo / fallback ==="
-tail -n 35 "$LOGDIR/lxqt.log" 2>/dev/null || echo "Sem log do desktop ativo."
+echo "=== GNOME Flashback ==="
+if [ -s "$LOGDIR/gnome-flashback.log" ]; then
+  tail -n 100 "$LOGDIR/gnome-flashback.log"
+else
+  echo "Sem saída do GNOME Flashback."
+fi
+
+echo
+echo "=== Desktop ativo / Openbox ==="
+if [ -s "$LOGDIR/openbox.log" ]; then
+  tail -n 50 "$LOGDIR/openbox.log"
+else
+  echo "Openbox não foi usado ou não gerou log."
+fi
 
 echo
 echo "=== Últimas linhas do Xorg/Xvfb ==="
-if [ -f "$LOGDIR/Xorg.0.log" ]; then
-  tail -n 35 "$LOGDIR/Xorg.0.log" 2>/dev/null || true
-else
-  tail -n 35 "$LOGDIR/xvfb.log" 2>/dev/null || true
-fi
+tail -n 40 "$LOGDIR/xvfb.log" 2>/dev/null || true
 
 echo
 echo "=== Últimas linhas do cloudflared ==="

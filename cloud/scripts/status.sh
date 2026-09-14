@@ -5,6 +5,7 @@ BASE=/tmp/maquina-virtual
 PIDDIR="$BASE/pids"
 SESSION="$BASE/session.json"
 LOGDIR="$BASE/logs"
+MODE_FILE="$BASE/desktop_mode"
 
 check_pid() {
   local name="$1"
@@ -26,6 +27,10 @@ for name in xvfb lxqt x11vnc websockify cloudflared; do
   check_pid "$name" || true
 done
 
+if [ -f "$MODE_FILE" ]; then
+  echo "Desktop: $(cat "$MODE_FILE")"
+fi
+
 echo
 echo "=== Portas locais ==="
 ss -ltn 2>/dev/null | grep -E ':5900|:6080' || true
@@ -38,11 +43,17 @@ else
 fi
 
 echo
-echo "=== GPU ==="
+echo "=== GPU / gráficos ==="
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader
+  nvidia-smi --query-gpu=name,memory.total,memory.free,driver_version --format=csv,noheader
 else
   echo "Nenhuma GPU NVIDIA disponível neste runtime."
+fi
+if command -v glxinfo >/dev/null 2>&1; then
+  DISPLAY=:10 glxinfo -B 2>/dev/null | grep -E 'OpenGL vendor|OpenGL renderer|OpenGL core profile version|OpenGL version' || true
+fi
+if command -v vulkaninfo >/dev/null 2>&1; then
+  echo "Vulkan tool: instalado"
 fi
 
 echo
@@ -63,6 +74,8 @@ with open(p, encoding='utf-8') as f:
     d=json.load(f)
 print('URL:', d.get('public_url',''))
 print('Resolução:', d.get('resolution',''))
+print('Desktop:', d.get('desktop_mode',''))
+print('Usuário:', d.get('session_user',''))
 print('Túnel verificado ao criar:', d.get('tunnel_verified', False))
 print('Deep link:', d.get('deep_link',''))
 PY
@@ -77,6 +90,10 @@ PY
 else
   echo "Nenhuma sessão ativa registrada."
 fi
+
+echo
+echo "=== Últimas linhas do desktop ==="
+tail -n 30 "$LOGDIR/lxqt.log" 2>/dev/null || echo "Sem log do desktop."
 
 echo
 echo "=== Últimas linhas do cloudflared ==="
